@@ -1,0 +1,26 @@
+// Metreon host execution-context declarations.
+context Host::Process grants {
+    atomic,
+    allocate,
+    sleep,
+    block,
+    host_io
+};
+
+context Host::SoftIrq grants {
+    atomic,
+    mmio,
+    defer<Host::Process>
+};
+
+context Host::HardIrq<I: Irq> grants {
+    atomic,
+    mmio,
+    irq_ack<I>,
+    defer<Host::SoftIrq>
+};
+
+context Host::Callback<S: StreamId> grants {
+    atomic,
+    defer<Host::Process>
+};
