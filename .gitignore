@@ -31,3 +31,6 @@ CMakeUserPresets.json
 /libmetreon_frontend.a
 /metreonc
 /metreon_frontend_tests
+
+# Temporary testing files(directory)
+/tmp/

@@ -16,10 +16,17 @@ public:
 
 private:
   ast::ContextDeclaration parseContextDeclaration();
+  ast::ResourceDeclaration parseResourceDeclaration();
+  ast::ResourceStateDeclaration parseResourceStateDeclaration();
+  ast::ResourceTransitionDeclaration parseResourceTransitionDeclaration();
   ast::QualifiedName parseQualifiedName();
   ast::TypeReference parseTypeReference();
-  std::vector<ast::ContextParameter> parseContextParameters();
+  ast::ValueType parseValueType();
+  std::vector<ast::ContextParameter> parseGenericParameters();
   std::vector<ast::GrantDeclaration> parseGrantList();
+  std::vector<ast::ResourceField> parseResourceFields();
+  std::vector<ast::TransitionParameter> parseTransitionParameters();
+  std::vector<ast::TypeReference> parseEffectSet();
 
   bool consume(lexer::TokenKind kind);
   lexer::Token expect(lexer::TokenKind kind, const std::string &expectation);

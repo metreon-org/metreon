@@ -7,6 +7,7 @@
 
 namespace metreon::graphir {
 
+Module lowerModule(const ast::Module &sourceModule, std::string sourceName);
 Module lowerContexts(const ast::Module &sourceModule, std::string sourceName);
 
 } // namespace metreon::graphir

@@ -68,7 +68,7 @@ int main(int argc, char **argv) {
     metreon::parser::Parser parser(source);
     const metreon::ast::Module module = parser.parseModule();
     const metreon::graphir::Module graph =
-        metreon::graphir::lowerContexts(module, sourceName);
+        metreon::graphir::lowerModule(module, sourceName);
     std::cout << graph.print();
     return 0;
   } catch (const metreon::DiagnosticError &error) {

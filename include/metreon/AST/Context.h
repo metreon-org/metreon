@@ -62,11 +62,93 @@ struct ContextDeclaration {
   QualifiedName name;
   std::vector<ContextParameter> parameters;
   std::vector<GrantDeclaration> grants;
+  std::string identifier;
+  SourceLocation identifierLocation;
+  SourceLocation location;
+};
+
+enum class OwnershipQualifier {
+  None,
+  Own,
+};
+
+struct ValueType {
+  OwnershipQualifier ownership = OwnershipQualifier::None;
+  TypeReference reference;
+  SourceLocation location;
+
+  std::string str() const {
+    return ownership == OwnershipQualifier::Own
+               ? "own " + reference.str()
+               : reference.str();
+  }
+};
+
+struct ResourceField {
+  std::string name;
+  ValueType type;
+  SourceLocation location;
+};
+
+struct ResourceStateDeclaration {
+  std::string name;
+  std::vector<ResourceField> fields;
+  SourceLocation location;
+};
+
+struct TransitionParameter {
+  std::string name;
+  ValueType type;
+  bool isContextEvidence = false;
+  SourceLocation location;
+
+  std::string str() const {
+    return std::string(isContextEvidence ? "@" : "") + name + ": " +
+           type.str();
+  }
+};
+
+struct AllowsClause {
+  TypeReference context;
+  std::vector<TypeReference> capabilities;
+  SourceLocation location;
+
+  std::string str() const {
+    std::ostringstream output;
+    output << context.str() << " allows {";
+    for (std::size_t index = 0; index < capabilities.size(); ++index) {
+      if (index != 0) {
+        output << ", ";
+      }
+      output << capabilities[index].str();
+    }
+    output << '}';
+    return output.str();
+  }
+};
+
+struct ResourceTransitionDeclaration {
+  std::string name;
+  std::vector<ContextParameter> genericParameters;
+  std::vector<TransitionParameter> parameters;
+  TypeReference resultState;
+  std::vector<TypeReference> effects;
+  std::vector<AllowsClause> allowsClauses;
+  bool isAwait = false;
+  SourceLocation location;
+};
+
+struct ResourceDeclaration {
+  QualifiedName name;
+  std::vector<ContextParameter> parameters;
+  std::vector<ResourceStateDeclaration> states;
+  std::vector<ResourceTransitionDeclaration> transitions;
   SourceLocation location;
 };
 
 struct Module {
   std::vector<ContextDeclaration> contexts;
+  std::vector<ResourceDeclaration> resources;
 };
 
 } // namespace metreon::ast

@@ -11,6 +11,13 @@ enum class TokenKind {
   Identifier,
   KeywordContext,
   KeywordGrants,
+  KeywordResource,
+  KeywordState,
+  KeywordTransition,
+  KeywordAwait,
+  KeywordWhere,
+  KeywordAllows,
+  KeywordOwn,
   ColonColon,
   Colon,
   Less,
@@ -18,7 +25,12 @@ enum class TokenKind {
   Comma,
   LeftBrace,
   RightBrace,
+  LeftParen,
+  RightParen,
   Semicolon,
+  At,
+  Bang,
+  Arrow,
 };
 
 struct Token {

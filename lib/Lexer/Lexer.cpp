@@ -31,6 +31,20 @@ const char *tokenKindName(TokenKind kind) {
     return "`context`";
   case TokenKind::KeywordGrants:
     return "`grants`";
+  case TokenKind::KeywordResource:
+    return "`resource`";
+  case TokenKind::KeywordState:
+    return "`state`";
+  case TokenKind::KeywordTransition:
+    return "`transition`";
+  case TokenKind::KeywordAwait:
+    return "`await`";
+  case TokenKind::KeywordWhere:
+    return "`where`";
+  case TokenKind::KeywordAllows:
+    return "`allows`";
+  case TokenKind::KeywordOwn:
+    return "`own`";
   case TokenKind::ColonColon:
     return "`::`";
   case TokenKind::Colon:
@@ -45,8 +59,18 @@ const char *tokenKindName(TokenKind kind) {
     return "`{`";
   case TokenKind::RightBrace:
     return "`}`";
+  case TokenKind::LeftParen:
+    return "`(`";
+  case TokenKind::RightParen:
+    return "`)`";
   case TokenKind::Semicolon:
     return "`;`";
+  case TokenKind::At:
+    return "`@`";
+  case TokenKind::Bang:
+    return "`!`";
+  case TokenKind::Arrow:
+    return "`->`";
   }
   return "unknown token";
 }
@@ -138,6 +162,20 @@ Token Lexer::lexIdentifier() {
     kind = TokenKind::KeywordContext;
   } else if (text == "grants") {
     kind = TokenKind::KeywordGrants;
+  } else if (text == "resource") {
+    kind = TokenKind::KeywordResource;
+  } else if (text == "state") {
+    kind = TokenKind::KeywordState;
+  } else if (text == "transition") {
+    kind = TokenKind::KeywordTransition;
+  } else if (text == "await") {
+    kind = TokenKind::KeywordAwait;
+  } else if (text == "where") {
+    kind = TokenKind::KeywordWhere;
+  } else if (text == "allows") {
+    kind = TokenKind::KeywordAllows;
+  } else if (text == "own") {
+    kind = TokenKind::KeywordOwn;
   }
   return Token{kind, std::move(text), start};
 }
@@ -177,8 +215,21 @@ Token Lexer::next() {
     return punctuation(TokenKind::LeftBrace);
   case '}':
     return punctuation(TokenKind::RightBrace);
+  case '(':
+    return punctuation(TokenKind::LeftParen);
+  case ')':
+    return punctuation(TokenKind::RightParen);
   case ';':
     return punctuation(TokenKind::Semicolon);
+  case '@':
+    return punctuation(TokenKind::At);
+  case '!':
+    return punctuation(TokenKind::Bang);
+  case '-':
+    if (peek() == '>') {
+      return punctuation(TokenKind::Arrow, 2);
+    }
+    break;
   default:
     break;
   }

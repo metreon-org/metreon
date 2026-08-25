@@ -5,22 +5,22 @@ context Host::Process grants {
     sleep,
     block,
     host_io
-};
+} process;
 
 context Host::SoftIrq grants {
     atomic,
     mmio,
     defer<Host::Process>
-};
+} soft_irq;
 
 context Host::HardIrq<I: Irq> grants {
     atomic,
     mmio,
     irq_ack<I>,
     defer<Host::SoftIrq>
-};
+} hard_irq;
 
 context Host::Callback<S: StreamId> grants {
     atomic,
     defer<Host::Process>
-};
+} callback;
