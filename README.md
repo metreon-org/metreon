@@ -8,6 +8,7 @@ cmake -S . -B build
 cmake --build build --parallel
 ./build/metreonc --emit=graphir examples/contexts.mtr
 ./build/metreonc --emit=graphir examples/resources.mtr
+./build/metreonc --emit=graphir examples/accumulators.mtr
 ```
 
 The current compiler parses and validates `.mtr` context declarations and
@@ -25,6 +26,17 @@ Every context declaration ends with a module-unique identifier after its grant
 block, for example `} thread1;`. Multiple declarations may share the same
 context type, such as `Gpu::Thread`, while their identifiers, grants, `#ctxN`
 metadata, and resource-template validation remain distinct.
+
+Context angle brackets accept either generic parameter declarations, such as
+`Transport::TxQueue<N: Nic, Q: Queue>`, or concrete type arguments, such as
+`Gpu::PersistentWorker<D, Uniform<Block>>`. Nested arguments including
+`Uniform<Block>` and `Uniform<Cluster>` are preserved in context metadata.
+Parameter declarations and concrete arguments cannot be mixed in one list.
+
+Resource states may opt into persistent accumulator storage after their state
+declaration with `accumulator State(scope);`. Supported scopes are `thread`,
+`warp`, `block`, `device`, `cluster`, and `host::pinned`. GraphIR records the
+selected scope in the corresponding `graphir.resource_state` metadata.
 
 ## Context evidence
 

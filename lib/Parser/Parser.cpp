@@ -34,7 +34,7 @@ ast::ContextDeclaration Parser::parseContextDeclaration() {
   declaration.name = parseQualifiedName();
 
   if (consume(lexer::TokenKind::Less)) {
-    declaration.parameters = parseGenericParameters();
+    parseContextGenerics(declaration);
   }
 
   expect(lexer::TokenKind::KeywordGrants, "`grants`");
@@ -75,18 +75,38 @@ ast::ResourceDeclaration Parser::parseResourceDeclaration() {
       declaration.states.push_back(parseResourceStateDeclaration());
       continue;
     }
+    if (current_.kind == lexer::TokenKind::KeywordAccumulator) {
+      declaration.accumulators.push_back(
+          parseResourceAccumulatorDeclaration());
+      continue;
+    }
     if (current_.kind == lexer::TokenKind::KeywordTransition ||
         current_.kind == lexer::TokenKind::KeywordAwait) {
       declaration.transitions.push_back(parseResourceTransitionDeclaration());
       continue;
     }
     fail("parse.expected_resource_member",
-         "expected a state or transition declaration, found " +
+         "expected a state, accumulator, or transition declaration, found " +
              std::string(lexer::tokenKindName(current_.kind)));
   }
   expect(lexer::TokenKind::RightBrace, "`}` after the resource body");
   consume(lexer::TokenKind::Semicolon);
   return declaration;
+}
+
+ast::ResourceAccumulatorDeclaration
+Parser::parseResourceAccumulatorDeclaration() {
+  const lexer::Token accumulatorToken =
+      expect(lexer::TokenKind::KeywordAccumulator, "`accumulator`");
+  const lexer::Token state =
+      expect(lexer::TokenKind::Identifier, "a previously declared state name");
+  expect(lexer::TokenKind::LeftParen,
+         "`(` after the accumulator state name");
+  ast::QualifiedName scope = parseQualifiedName();
+  expect(lexer::TokenKind::RightParen, "`)` after the accumulator scope");
+  expect(lexer::TokenKind::Semicolon, "`;` after the accumulator declaration");
+  return ast::ResourceAccumulatorDeclaration{
+      state.text, std::move(scope), state.location, accumulatorToken.location};
 }
 
 ast::ResourceStateDeclaration Parser::parseResourceStateDeclaration() {
@@ -160,8 +180,12 @@ ast::QualifiedName Parser::parseQualifiedName() {
 }
 
 ast::TypeReference Parser::parseTypeReference() {
+  return parseTypeReference(parseQualifiedName());
+}
+
+ast::TypeReference Parser::parseTypeReference(ast::QualifiedName name) {
   ast::TypeReference reference;
-  reference.name = parseQualifiedName();
+  reference.name = std::move(name);
   reference.location = reference.name.location;
 
   if (!consume(lexer::TokenKind::Less)) {
@@ -194,6 +218,53 @@ ast::ValueType Parser::parseValueType() {
   }
   type.reference = parseTypeReference();
   return type;
+}
+
+void Parser::parseContextGenerics(ast::ContextDeclaration &declaration) {
+  if (current_.kind == lexer::TokenKind::Greater) {
+    fail("parse.empty_context_generics",
+         "context generic lists cannot be empty");
+  }
+
+  ast::QualifiedName firstName = parseQualifiedName();
+  if (consume(lexer::TokenKind::Colon)) {
+    if (firstName.components.size() != 1) {
+      fail("parse.qualified_generic_parameter",
+           "generic parameter names cannot be qualified");
+    }
+    declaration.parameters.push_back(ast::ContextParameter{
+        firstName.components.front(), parseTypeReference(),
+        firstName.location});
+
+    while (consume(lexer::TokenKind::Comma)) {
+      if (current_.kind == lexer::TokenKind::Greater) {
+        fail("parse.trailing_generic_parameter_comma",
+             "generic parameter lists do not permit a trailing comma");
+      }
+      const lexer::Token name =
+          expect(lexer::TokenKind::Identifier, "a generic parameter name");
+      expect(lexer::TokenKind::Colon,
+             "`:` after the generic parameter name; context declarations "
+             "cannot mix generic parameters and concrete arguments");
+      declaration.parameters.push_back(ast::ContextParameter{
+          name.text, parseTypeReference(), name.location});
+    }
+    expect(lexer::TokenKind::Greater, "`>` after context parameters");
+    return;
+  }
+
+  declaration.arguments.push_back(
+      parseTypeReference(std::move(firstName)));
+  while (consume(lexer::TokenKind::Comma)) {
+    if (current_.kind == lexer::TokenKind::Greater) {
+      fail("parse.trailing_type_argument_comma",
+           "type argument lists do not permit a trailing comma");
+    }
+    declaration.arguments.push_back(parseTypeReference());
+  }
+  expect(lexer::TokenKind::Greater,
+         "`>` after context arguments; context declarations cannot mix "
+         "concrete arguments and generic parameters");
 }
 
 std::vector<ast::ContextParameter> Parser::parseGenericParameters() {

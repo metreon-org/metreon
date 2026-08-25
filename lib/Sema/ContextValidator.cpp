@@ -3,6 +3,7 @@
 #include "metreon/Basic/Diagnostic.h"
 
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace metreon::sema {
@@ -11,7 +12,7 @@ void validateContexts(const ast::Module &module) {
   std::unordered_set<std::string> contextIdentifiers;
 
   for (const ast::ContextDeclaration &context : module.contexts) {
-    const std::string contextName = context.name.str();
+    const std::string contextName = context.typeName();
     if (!contextIdentifiers.insert(context.identifier).second) {
       throw DiagnosticError(
           {"sema.duplicate_context_identifier",
@@ -76,6 +77,7 @@ void validateResources(const ast::Module &module) {
     }
 
     std::unordered_set<std::string> stateNames;
+    std::unordered_map<std::string, SourceLocation> stateLocations;
     for (const ast::ResourceStateDeclaration &state : resource.states) {
       if (!stateNames.insert(state.name).second) {
         throw DiagnosticError({"sema.duplicate_resource_state",
@@ -83,6 +85,7 @@ void validateResources(const ast::Module &module) {
                                    resourceName + "`",
                                state.location});
       }
+      stateLocations.emplace(state.name, state.location);
 
       std::unordered_set<std::string> fieldNames;
       for (const ast::ResourceField &field : state.fields) {
@@ -93,6 +96,46 @@ void validateResources(const ast::Module &module) {
                    state.name + "`",
                field.location});
         }
+      }
+    }
+
+    const std::unordered_set<std::string> allowedAccumulatorScopes = {
+        "thread", "warp", "block", "device", "cluster", "host::pinned"};
+    std::unordered_set<std::string> accumulatedStates;
+    for (const ast::ResourceAccumulatorDeclaration &accumulator :
+         resource.accumulators) {
+      const auto stateLocation = stateLocations.find(accumulator.stateName);
+      if (stateLocation == stateLocations.end()) {
+        throw DiagnosticError(
+            {"sema.unknown_accumulator_state",
+             "accumulator refers to unknown state `" + accumulator.stateName +
+                 "` in `" + resourceName + "`",
+             accumulator.stateLocation});
+      }
+      if (stateLocation->second.offset >= accumulator.location.offset) {
+        throw DiagnosticError(
+            {"sema.accumulator_before_state",
+             "state `" + accumulator.stateName +
+                 "` must be declared before its accumulator",
+             accumulator.stateLocation});
+      }
+      if (!accumulatedStates.insert(accumulator.stateName).second) {
+        throw DiagnosticError(
+            {"sema.duplicate_state_accumulator",
+             "state `" + accumulator.stateName +
+                 "` has more than one accumulator in `" + resourceName + "`",
+             accumulator.stateLocation});
+      }
+
+      const std::string scope = accumulator.scope.str();
+      if (allowedAccumulatorScopes.find(scope) ==
+          allowedAccumulatorScopes.end()) {
+        throw DiagnosticError(
+            {"sema.invalid_accumulator_scope",
+             "invalid accumulator scope `" + scope +
+                 "`; expected thread, warp, block, device, cluster, or "
+                 "host::pinned",
+             accumulator.scope.location});
       }
     }
 

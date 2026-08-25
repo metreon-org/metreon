@@ -196,30 +196,29 @@ void expectLogicError(const std::string &expectedText,
 
 const char *contextSource = R"(
 context Host::Process grants {
-  atomic,
   allocate,
   sleep,
   block,
   host_io
-} process;
+} process_ctx;
 
 context Host::SoftIrq grants {
   atomic,
   mmio,
   defer<Host::Process>
-} soft_irq;
+} softirq_ctx;
 
 context Host::HardIrq<I: Irq> grants {
   atomic,
   mmio,
   irq_ack<I>,
   defer<Host::SoftIrq>
-} hard_irq;
+} harirq_ctx;
 
 context Host::Callback<S: StreamId> grants {
   atomic,
   defer<Host::Process>
-} callback;
+} host_callback_ctx;
 )";
 
 const char *resourceSource = R"(
@@ -256,6 +255,29 @@ resource CopySlot<S: AddressSpace> {
   ) -> Ready
   !{gpu_await}
   where C allows {gpu_await};
+}
+)";
+
+const char *accumulatorSource = R"(
+context Gpu::PersistentWorker<
+  D: Device,
+  U: Uniform<Cluster>
+> grants {
+  gpu_async_copy
+} temp_ctx_identifier;
+
+resource TemporaryResource<S: AddressSpace> {
+  state TempState1(storage: own Buffer<S>);
+  state TempState2(storage: own Buffer<S>);
+
+  accumulator TempState1(device);
+  accumulator TempState2(cluster);
+
+  transition change(
+    @cx: C;
+    self: own TempState1
+  ) -> TempState2 !{gpu_async_copy}
+  where C allows {gpu_async_copy};
 }
 )";
 
@@ -318,6 +340,22 @@ void tokenizesResourceDeclarations() {
         "resource syntax was not fully tokenized");
 }
 
+void tokenizesAccumulatorDeclarations() {
+  metreon::lexer::Lexer lexer(accumulatorSource);
+  std::size_t accumulatorCount = 0;
+  while (true) {
+    const metreon::lexer::Token token = lexer.next();
+    if (token.kind == metreon::lexer::TokenKind::KeywordAccumulator) {
+      ++accumulatorCount;
+    }
+    if (token.kind == metreon::lexer::TokenKind::EndOfFile) {
+      break;
+    }
+  }
+  check(accumulatorCount == 2,
+        "accumulator declarations were not tokenized as keywords");
+}
+
 void parsesResourceDeclarations() {
   const metreon::ast::Module module = parse(resourceSource);
   check(module.contexts.size() == 2,
@@ -361,6 +399,86 @@ void parsesResourceDeclarations() {
             complete.allowsClauses.front().str() ==
                 "C allows {gpu_await}",
         "lost await transition conditions");
+}
+
+void parsesAndLowersAccumulators() {
+  const metreon::ast::Module module = parse(accumulatorSource);
+  check(module.resources.size() == 1,
+        "accumulator example lost its resource declaration");
+  const metreon::ast::ResourceDeclaration &resource = module.resources.front();
+  check(resource.parameters.size() == 1 &&
+            resource.parameters[0].name == "S" &&
+            resource.parameters[0].constraint.str() == "AddressSpace",
+        "accumulator resource lost its constrained generic parameter");
+  check(resource.states.size() == 2 && resource.accumulators.size() == 2,
+        "accumulator declarations were not retained in the AST");
+  check(resource.accumulators[0].stateName == "TempState1" &&
+            resource.accumulators[0].scope.str() == "device" &&
+            resource.accumulators[1].stateName == "TempState2" &&
+            resource.accumulators[1].scope.str() == "cluster",
+        "accumulator state or persistence scope was lost");
+
+  const Module graph = metreon::graphir::lowerModule(
+      module, "accumulators.mtr");
+  check(graph.resourceGraphs().size() == 1,
+        "accumulator resource graph was not emitted");
+  const ResourceGraph &resourceGraph = graph.resourceGraphs().front();
+  const ResourceStateNode *first =
+      findResourceState(resourceGraph, "TempState1");
+  const ResourceStateNode *second =
+      findResourceState(resourceGraph, "TempState2");
+  check(first != nullptr && second != nullptr,
+        "accumulator states were not lowered");
+  const auto firstAccumulator = first->attributes.find("accumulator");
+  const auto secondAccumulator = second->attributes.find("accumulator");
+  check(firstAccumulator != first->attributes.end() &&
+            firstAccumulator->second == "device" &&
+            secondAccumulator != second->attributes.end() &&
+            secondAccumulator->second == "cluster",
+        "persistent scopes were not attached to GraphIR resource states");
+
+  const std::string printed = graph.print();
+  check(printed.find("graphir.resource_state \"TempState1\" "
+                     "{accumulator = \"device\"") != std::string::npos &&
+            printed.find("graphir.resource_state \"TempState2\" "
+                         "{accumulator = \"cluster\"") != std::string::npos,
+        "textual GraphIR omitted accumulator fields");
+}
+
+void acceptsAllAccumulatorScopes() {
+  const std::string source = R"(
+resource ScopeResource<S: AddressSpace> {
+  state ThreadState();
+  state WarpState();
+  state BlockState();
+  state DeviceState();
+  state ClusterState();
+  state HostPinnedState();
+
+  accumulator ThreadState(thread);
+  accumulator WarpState(warp);
+  accumulator BlockState(block);
+  accumulator DeviceState(device);
+  accumulator ClusterState(cluster);
+  accumulator HostPinnedState(host::pinned);
+}
+)";
+  const Module graph = metreon::graphir::lowerModule(
+      parse(source), "accumulator-scopes.mtr");
+  const ResourceGraph &resource = graph.resourceGraphs().front();
+  const std::vector<std::pair<std::string, std::string>> expected = {
+      {"ThreadState", "thread"},       {"WarpState", "warp"},
+      {"BlockState", "block"},         {"DeviceState", "device"},
+      {"ClusterState", "cluster"},     {"HostPinnedState", "host::pinned"},
+  };
+  for (const auto &[stateName, scope] : expected) {
+    const ResourceStateNode *state = findResourceState(resource, stateName);
+    check(state != nullptr, "allowed accumulator scope lost its state");
+    const auto accumulator = state->attributes.find("accumulator");
+    check(accumulator != state->attributes.end() &&
+              accumulator->second == scope,
+          "allowed accumulator scope was not preserved");
+  }
 }
 
 void lowersResourcesAsSeparateGraphs() {
@@ -540,9 +658,21 @@ void parsesContextDeclarations() {
   const metreon::ast::Module module = parse(contextSource);
   check(module.contexts.size() == 4, "expected four context declarations");
 
+  const metreon::ast::ContextDeclaration &process = module.contexts[0];
+  const metreon::ast::ContextDeclaration &softIrq = module.contexts[1];
   const metreon::ast::ContextDeclaration &hardIrq = module.contexts[2];
+  const metreon::ast::ContextDeclaration &callback = module.contexts[3];
+  check(process.identifier == "process_ctx" && process.grants.size() == 4 &&
+            process.grants[0].capability.str() == "allocate" &&
+            process.grants[1].capability.str() == "sleep" &&
+            process.grants[2].capability.str() == "block" &&
+            process.grants[3].capability.str() == "host_io",
+        "Host::Process does not match tmp/example1.mtr");
+  check(softIrq.identifier == "softirq_ctx" && softIrq.grants.size() == 3 &&
+            softIrq.grants[2].capability.str() == "defer<Host::Process>",
+        "Host::SoftIrq does not match tmp/example1.mtr");
   check(hardIrq.name.str() == "Host::HardIrq", "lost qualified context name");
-  check(hardIrq.identifier == "hard_irq", "lost context identifier");
+  check(hardIrq.identifier == "harirq_ctx", "lost context identifier");
   check(hardIrq.parameters.size() == 1, "lost HardIrq context variable");
   check(hardIrq.parameters[0].name == "I", "wrong context variable name");
   check(hardIrq.parameters[0].constraint.str() == "Irq",
@@ -550,11 +680,148 @@ void parsesContextDeclarations() {
   check(hardIrq.grants.size() == 4, "wrong HardIrq grant count");
   check(hardIrq.grants[2].capability.str() == "irq_ack<I>",
         "lost parameterized grant");
+  check(callback.identifier == "host_callback_ctx" &&
+            callback.parameters.size() == 1 && callback.grants.size() == 2 &&
+            callback.grants[1].capability.str() == "defer<Host::Process>",
+        "Host::Callback does not match tmp/example1.mtr");
 
   const metreon::ast::Module empty =
       parse("context Host::Callback<S: StreamId> grants {} callback;");
   check(empty.contexts.front().grants.empty(),
         "empty grant set should be accepted");
+}
+
+void parsesPlatformContextsAndLowersMetadata() {
+  const std::string source = R"(
+context Gpu::Thread<D, U> grants {
+} gpu_thread;
+
+context Gpu::PersistentWorker<D, Uniform<Block>> grants {
+  gpu_persistent_work
+} persistent_worker;
+
+context Gpu::PersistentWorker<D, Uniform<Cluster>> grants {
+  gpu_persistent_work
+} cluster_worker;
+
+context Transport::TxQueue<N: Nic, Q: Queue> grants {
+  net_dma_submit,
+  net_completion,
+  transport_cancel
+} transport_ctx;
+)";
+
+  const metreon::ast::Module module = parse(source);
+  check(module.contexts.size() == 4,
+        "expected GPU thread, worker specializations, and transport context");
+
+  const metreon::ast::ContextDeclaration &gpuThread = module.contexts[0];
+  const metreon::ast::ContextDeclaration &blockWorker = module.contexts[1];
+  const metreon::ast::ContextDeclaration &clusterWorker = module.contexts[2];
+  const metreon::ast::ContextDeclaration &transport = module.contexts[3];
+  check(gpuThread.name.str() == "Gpu::Thread" &&
+            gpuThread.parameters.empty() && gpuThread.arguments.size() == 2 &&
+            gpuThread.arguments[0].str() == "D" &&
+            gpuThread.arguments[1].str() == "U" &&
+            gpuThread.typeName() == "Gpu::Thread<D, U>" &&
+            gpuThread.grants.empty() && gpuThread.identifier == "gpu_thread",
+        "lost concrete Gpu::Thread context arguments or identifier");
+  check(blockWorker.name.str() == "Gpu::PersistentWorker" &&
+            blockWorker.parameters.empty() &&
+            blockWorker.arguments.size() == 2 &&
+            blockWorker.arguments[0].str() == "D" &&
+            blockWorker.arguments[1].str() == "Uniform<Block>" &&
+            blockWorker.typeName() ==
+                "Gpu::PersistentWorker<D, Uniform<Block>>",
+        "lost concrete nested PersistentWorker arguments");
+  check(clusterWorker.arguments.size() == 2 &&
+            clusterWorker.arguments[1].str() == "Uniform<Cluster>" &&
+            clusterWorker.typeName() ==
+                "Gpu::PersistentWorker<D, Uniform<Cluster>>",
+        "Uniform<Cluster> was not accepted as a context argument");
+  check(transport.typeName() == "Transport::TxQueue" &&
+            transport.arguments.empty() && transport.parameters.size() == 2 &&
+            transport.parameters[0].name == "N" &&
+            transport.parameters[0].constraint.str() == "Nic" &&
+            transport.parameters[1].name == "Q" &&
+            transport.parameters[1].constraint.str() == "Queue" &&
+            transport.grants.size() == 3,
+        "lost Transport::TxQueue parameters or grants");
+
+  const Module graph =
+      metreon::graphir::lowerContexts(module, "platform-contexts.mtr");
+  const ContextMetadataRef gpuThreadMetadata =
+      findContext(graph, "Gpu::Thread<D, U>", ContextResolution::Declared,
+                  "gpu_thread");
+  const ContextMetadataRef blockMetadata = findContext(
+      graph, "Gpu::PersistentWorker<D, Uniform<Block>>",
+      ContextResolution::Declared, "persistent_worker");
+  const ContextMetadataRef clusterMetadata = findContext(
+      graph, "Gpu::PersistentWorker<D, Uniform<Cluster>>",
+      ContextResolution::Declared, "cluster_worker");
+  const ContextMetadataRef transportMetadata = findContext(
+      graph, "Transport::TxQueue", ContextResolution::Declared,
+      "transport_ctx");
+  check(gpuThreadMetadata && blockMetadata && clusterMetadata &&
+            transportMetadata && gpuThreadMetadata->genericArity() == 2 &&
+            blockMetadata->genericArity() == 2 &&
+            clusterMetadata->genericArity() == 2 &&
+            transportMetadata->genericArity() == 2,
+        "platform contexts did not receive distinct GraphIR metadata");
+
+  const Node *persistentGrant =
+      findNode(graph, NodeKind::Grant, "gpu_persistent_work",
+               "Gpu::PersistentWorker<D, Uniform<Block>>");
+  const Node *transportSubmit = findNode(
+      graph, NodeKind::Grant, "net_dma_submit", "Transport::TxQueue");
+  const Node *transportCompletion = findNode(
+      graph, NodeKind::Grant, "net_completion", "Transport::TxQueue");
+  const Node *transportCancel = findNode(
+      graph, NodeKind::Grant, "transport_cancel", "Transport::TxQueue");
+  check(persistentGrant != nullptr && transportSubmit != nullptr &&
+            transportCompletion != nullptr && transportCancel != nullptr &&
+            transportSubmit->context->hasSameIdentity(*transportMetadata),
+        "platform context grants were not attached to their metadata");
+
+  const std::string printed = graph.print();
+  check(printed.find("graphir.context_metadata \"Gpu::Thread<D, U>\"") !=
+                std::string::npos &&
+            printed.find(
+                "graphir.context_metadata \"Gpu::PersistentWorker<D, "
+                "Uniform<Block>>\"") != std::string::npos &&
+            printed.find(
+                "graphir.context_metadata \"Transport::TxQueue\"") !=
+                std::string::npos &&
+            printed.find(
+                "graphir.context_identifier \"transport_ctx\" -> #ctx3") !=
+                std::string::npos,
+        "textual GraphIR omitted platform context assignments");
+}
+
+void resolvesConcreteContextTypes() {
+  const std::string source = R"(
+context Gpu::PersistentWorker<D, Uniform<Block>> grants {
+  gpu_persistent_work
+} persistent_worker;
+
+context Host::Dispatcher grants {
+  defer<Gpu::PersistentWorker<D, Uniform<Block>>>
+} dispatcher;
+)";
+  const Module graph =
+      metreon::graphir::lowerContexts(parse(source), "concrete-target.mtr");
+  const ContextMetadataRef worker = findContext(
+      graph, "Gpu::PersistentWorker<D, Uniform<Block>>",
+      ContextResolution::Declared, "persistent_worker");
+  const Node *defer = findNode(
+      graph, NodeKind::Grant,
+      "defer<Gpu::PersistentWorker<D, Uniform<Block>>>", "Host::Dispatcher");
+  check(worker && defer != nullptr &&
+            hasContextEdge(graph, defer->id, worker, EdgeKind::Transition),
+        "concrete context type did not resolve to its declared metadata");
+  check(findContext(graph, "Gpu::PersistentWorker<D, Uniform<Block>>",
+                    ContextResolution::External) == nullptr,
+        "concrete context target was duplicated as external metadata");
 }
 
 void lowersContextsAsOpaqueMetadata() {
@@ -580,14 +847,14 @@ void lowersContextsAsOpaqueMetadata() {
 
   check(process && softIrq && hardIrq && callback,
         "missing context metadata");
-  check(process->identifier() == "process" &&
-            softIrq->identifier() == "soft_irq" &&
-            hardIrq->identifier() == "hard_irq" &&
-            callback->identifier() == "callback",
+  check(process->identifier() == "process_ctx" &&
+            softIrq->identifier() == "softirq_ctx" &&
+            hardIrq->identifier() == "harirq_ctx" &&
+            callback->identifier() == "host_callback_ctx",
         "context metadata lost user-facing identifiers");
   check(graph.contexts().size() == 4,
         "declared contexts must exist only in the metadata table");
-  check(graph.nodes().size() == 16,
+  check(graph.nodes().size() == 15,
         "context declarations must not consume graph node IDs");
   check(irqVariable != nullptr && streamVariable != nullptr,
         "missing context-variable node");
@@ -641,9 +908,10 @@ void lowersContextsAsOpaqueMetadata() {
   check(firstPrint.find("graphir.context_metadata \"Host::HardIrq\"") !=
             std::string::npos,
         "textual GraphIR omitted HardIrq metadata");
-  check(firstPrint.find("identifier = \"hard_irq\"") != std::string::npos &&
+  check(firstPrint.find("identifier = \"harirq_ctx\"") !=
+            std::string::npos &&
             firstPrint.find(
-                "graphir.context_identifier \"hard_irq\" -> #ctx2") !=
+                "graphir.context_identifier \"harirq_ctx\" -> #ctx2") !=
                 std::string::npos,
         "textual GraphIR omitted the context identifier mapping");
   check(firstPrint.find("!graphir.context_key<") != std::string::npos,
@@ -831,6 +1099,42 @@ void diagnosesInvalidInput() {
     static_cast<void>(parse("/* never closed"));
   });
 
+  expectDiagnostic("parse.unexpected_token", [] {
+    static_cast<void>(parse("resource Slot<S> {}"));
+  });
+
+  expectDiagnostic("sema.unknown_accumulator_state", [] {
+    const auto module =
+        parse("resource Slot<S: AddressSpace> { "
+              "accumulator Missing(device); }");
+    static_cast<void>(
+        metreon::graphir::lowerModule(module, "unknown-accumulator-state.mtr"));
+  });
+
+  expectDiagnostic("sema.accumulator_before_state", [] {
+    const auto module =
+        parse("resource Slot<S: AddressSpace> { "
+              "accumulator Ready(device); state Ready(); }");
+    static_cast<void>(
+        metreon::graphir::lowerModule(module, "early-accumulator.mtr"));
+  });
+
+  expectDiagnostic("sema.duplicate_state_accumulator", [] {
+    const auto module =
+        parse("resource Slot<S: AddressSpace> { state Ready(); "
+              "accumulator Ready(device); accumulator Ready(cluster); }");
+    static_cast<void>(metreon::graphir::lowerModule(
+        module, "duplicate-accumulator.mtr"));
+  });
+
+  expectDiagnostic("sema.invalid_accumulator_scope", [] {
+    const auto module =
+        parse("resource Slot<S: AddressSpace> { state Ready(); "
+              "accumulator Ready(grid); }");
+    static_cast<void>(
+        metreon::graphir::lowerModule(module, "bad-accumulator-scope.mtr"));
+  });
+
   expectDiagnostic("sema.unknown_transition_target", [] {
     const auto module = parse(R"(
 resource Slot {
@@ -857,11 +1161,17 @@ resource Slot {
 int main() {
   const std::vector<std::pair<std::string, std::function<void()>>> tests = {
       {"tokenizes resource declarations", tokenizesResourceDeclarations},
+      {"tokenizes accumulator declarations", tokenizesAccumulatorDeclarations},
       {"parses resource declarations", parsesResourceDeclarations},
+      {"parses and lowers accumulators", parsesAndLowersAccumulators},
+      {"accepts all accumulator scopes", acceptsAllAccumulatorScopes},
       {"lowers resources as separate graphs", lowersResourcesAsSeparateGraphs},
       {"emits non-fatal context template checks",
        emitsNonFatalContextTemplateChecks},
       {"parses context declarations", parsesContextDeclarations},
+      {"parses platform contexts and lowers metadata",
+       parsesPlatformContextsAndLowersMetadata},
+      {"resolves concrete context types", resolvesConcreteContextTypes},
       {"lowers contexts as opaque metadata", lowersContextsAsOpaqueMetadata},
       {"enforces context key provenance", enforcesContextKeyProvenance},
       {"preserves empty context metadata", preservesEmptyContextsAsMetadata},

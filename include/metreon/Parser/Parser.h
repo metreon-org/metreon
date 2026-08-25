@@ -18,10 +18,13 @@ private:
   ast::ContextDeclaration parseContextDeclaration();
   ast::ResourceDeclaration parseResourceDeclaration();
   ast::ResourceStateDeclaration parseResourceStateDeclaration();
+  ast::ResourceAccumulatorDeclaration parseResourceAccumulatorDeclaration();
   ast::ResourceTransitionDeclaration parseResourceTransitionDeclaration();
   ast::QualifiedName parseQualifiedName();
   ast::TypeReference parseTypeReference();
+  ast::TypeReference parseTypeReference(ast::QualifiedName name);
   ast::ValueType parseValueType();
+  void parseContextGenerics(ast::ContextDeclaration &declaration);
   std::vector<ast::ContextParameter> parseGenericParameters();
   std::vector<ast::GrantDeclaration> parseGrantList();
   std::vector<ast::ResourceField> parseResourceFields();

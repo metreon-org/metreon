@@ -120,15 +120,22 @@ EdgeTarget getTransitionTarget(Module &graph,
     }
   }
 
-  const std::string contextName = targetReference.name.str();
-  const auto declaredType = contextsByType.find(contextName);
+  const std::string exactContextName = targetReference.str();
+  auto declaredType = contextsByType.find(exactContextName);
+  if (declaredType == contextsByType.end() &&
+      !targetReference.arguments.empty()) {
+    // A generic declaration is keyed by its base name, while a concrete
+    // declaration is keyed by its full instantiated type. Prefer the exact
+    // specialization and fall back to a generic declaration when one exists.
+    declaredType = contextsByType.find(targetReference.name.str());
+  }
   if (declaredType != contextsByType.end()) {
     if (declaredType->second.size() == 1) {
       return EdgeTarget{declaredType->second.front()};
     }
     throw DiagnosticError(
         {"sema.ambiguous_context_target",
-         "context type `" + contextName +
+         "context type `" + exactContextName +
              "` has multiple identifiers; use a context identifier as the "
              "transition target",
          targetReference.location});
@@ -155,10 +162,19 @@ void lowerResources(const ast::Module &sourceModule, Module &module) {
          {"generic_parameters", joinGenericParameters(resource.parameters)}},
         resource.location);
     ResourceStateMap states;
+    std::unordered_map<std::string, std::string> accumulatorScopes;
+    for (const ast::ResourceAccumulatorDeclaration &accumulator :
+         resource.accumulators) {
+      accumulatorScopes.emplace(accumulator.stateName, accumulator.scope.str());
+    }
 
     for (const ast::ResourceStateDeclaration &state : resource.states) {
       std::map<std::string, std::string> attributes = {
           {"field_count", std::to_string(state.fields.size())}};
+      const auto accumulator = accumulatorScopes.find(state.name);
+      if (accumulator != accumulatorScopes.end()) {
+        attributes.emplace("accumulator", accumulator->second);
+      }
       for (std::size_t index = 0; index < state.fields.size(); ++index) {
         const std::string prefix = "field." + std::to_string(index) + ".";
         attributes.emplace(prefix + "name", state.fields[index].name);
@@ -338,9 +354,9 @@ Module lowerModule(const ast::Module &sourceModule, std::string sourceName) {
   ContextMap externalContexts;
 
   for (const ast::ContextDeclaration &context : sourceModule.contexts) {
-    const std::string name = context.name.str();
+    const std::string name = context.typeName();
     ContextMetadataRef metadata = graph.addContextMetadata(
-        name, context.identifier, context.parameters.size(),
+        name, context.identifier, context.genericArity(),
         ContextResolution::Declared, context.location);
     contextsByIdentifier.emplace(context.identifier, metadata);
     contextsByType[name].push_back(std::move(metadata));

@@ -35,6 +35,8 @@ const char *tokenKindName(TokenKind kind) {
     return "`resource`";
   case TokenKind::KeywordState:
     return "`state`";
+  case TokenKind::KeywordAccumulator:
+    return "`accumulator`";
   case TokenKind::KeywordTransition:
     return "`transition`";
   case TokenKind::KeywordAwait:
@@ -166,6 +168,8 @@ Token Lexer::lexIdentifier() {
     kind = TokenKind::KeywordResource;
   } else if (text == "state") {
     kind = TokenKind::KeywordState;
+  } else if (text == "accumulator") {
+    kind = TokenKind::KeywordAccumulator;
   } else if (text == "transition") {
     kind = TokenKind::KeywordTransition;
   } else if (text == "await") {

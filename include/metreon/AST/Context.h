@@ -61,10 +61,31 @@ struct GrantDeclaration {
 struct ContextDeclaration {
   QualifiedName name;
   std::vector<ContextParameter> parameters;
+  std::vector<TypeReference> arguments;
   std::vector<GrantDeclaration> grants;
   std::string identifier;
   SourceLocation identifierLocation;
   SourceLocation location;
+
+  std::string typeName() const {
+    std::ostringstream output;
+    output << name.str();
+    if (!arguments.empty()) {
+      output << '<';
+      for (std::size_t index = 0; index < arguments.size(); ++index) {
+        if (index != 0) {
+          output << ", ";
+        }
+        output << arguments[index].str();
+      }
+      output << '>';
+    }
+    return output.str();
+  }
+
+  std::size_t genericArity() const noexcept {
+    return parameters.size() + arguments.size();
+  }
 };
 
 enum class OwnershipQualifier {
@@ -93,6 +114,13 @@ struct ResourceField {
 struct ResourceStateDeclaration {
   std::string name;
   std::vector<ResourceField> fields;
+  SourceLocation location;
+};
+
+struct ResourceAccumulatorDeclaration {
+  std::string stateName;
+  QualifiedName scope;
+  SourceLocation stateLocation;
   SourceLocation location;
 };
 
@@ -142,6 +170,7 @@ struct ResourceDeclaration {
   QualifiedName name;
   std::vector<ContextParameter> parameters;
   std::vector<ResourceStateDeclaration> states;
+  std::vector<ResourceAccumulatorDeclaration> accumulators;
   std::vector<ResourceTransitionDeclaration> transitions;
   SourceLocation location;
 };
