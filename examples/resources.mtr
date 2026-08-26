@@ -1,0 +1,40 @@
+context Gpu::Thread<
+    D: Device,
+    U: Uniformity
+> grants {
+    gpu_load,
+    gpu_store
+} thread1;
+
+context Gpu::Thread<
+    D: Device,
+    U: Uniformity
+> grants {
+    gpu_async_copy,
+    gpu_await,
+    gpu_atomic
+} thread2;
+
+resource CopySlot<S: AddressSpace> {
+    state Vacant(storage: own buffer<S>);
+    state InFlight(
+        storage: own buffer<S>,
+        ticket: own event<Copy>
+    );
+    state Ready(storage: own buffer<S>);
+
+    transition begin<C: Context>(
+        @cx: C;
+        self: own Vacant,
+        src: view<T, gpu::global>
+    ) -> InFlight
+    !{gpu_async_copy}
+    where C allows {gpu_async_copy};
+
+    await transition complete<C: Context>(
+        @cx: C;
+        self: own InFlight
+    ) -> Ready
+    !{gpu_await}
+    where C allows {gpu_await};
+}

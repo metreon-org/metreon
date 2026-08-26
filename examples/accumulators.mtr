@@ -1,0 +1,24 @@
+context Gpu::PersistentWorker<
+    D: Device,
+    U: Uniform<Cluster>
+> grants {
+    gpu_async_copy
+} temp_ctx_identifier;
+
+resource TemporaryResource<S: AddressSpace> {
+    state TempState1(
+        storage: own Buffer<S>
+    );
+    state TempState2(
+        storage: own Buffer<S>
+    );
+
+    accumulator TempState1(device);
+    accumulator TempState2(cluster);
+
+    transition change(
+        @cx: C;
+        self: own TempState1
+    ) -> TempState2 !{gpu_async_copy}
+    where C allows {gpu_async_copy};
+}
