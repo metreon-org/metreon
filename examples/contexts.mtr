@@ -1,0 +1,44 @@
+// Metreon host execution-context declarations.
+context Host::Process grants {
+    allocate,
+    sleep,
+    block,
+    host_io
+} process_ctx;
+
+context Host::SoftIrq grants {
+    atomic,
+    mmio,
+    defer<Host::Process>
+} softirq_ctx;
+
+context Host::HardIrq<I: Irq> grants {
+    atomic,
+    mmio,
+    irq_ack<I>,
+    defer<Host::SoftIrq>
+} harirq_ctx;
+
+context Host::Callback<S: StreamId> grants {
+    atomic,
+    defer<Host::Process>
+} host_callback_ctx;
+
+// A concrete GPU thread context. Its authority set is intentionally empty
+// until operations for this context are specified.
+context Gpu::Thread<D, U> grants {
+} gpu_thread;
+
+// A specialized GPU execution context. Concrete nested arguments are retained
+// as part of the context type rather than lowered as context variables.
+context Gpu::PersistentWorker<D, Uniform<Block>> grants {
+    gpu_persistent_work
+} persistent_worker;
+
+// Transport queue authority is metadata-only for now. The grants record the
+// operations this context is permitted to request at compile time.
+context Transport::TxQueue<N: Nic, Q: Queue> grants {
+    net_dma_submit,
+    net_completion,
+    transport_cancel
+} transport_ctx;
