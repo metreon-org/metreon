@@ -19,6 +19,7 @@ private:
   char advance() noexcept;
   void skipTrivia();
   Token lexIdentifier();
+  Token lexNumber();
   Token punctuation(TokenKind kind, std::size_t length = 1);
 
   std::string_view source_;

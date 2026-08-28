@@ -20,6 +20,8 @@ using metreon::graphir::ContextResolution;
 using metreon::graphir::ContextUse;
 using metreon::graphir::Edge;
 using metreon::graphir::EdgeKind;
+using metreon::graphir::KernelGraph;
+using metreon::graphir::KernelVariableNode;
 using metreon::graphir::Module;
 using metreon::graphir::Node;
 using metreon::graphir::NodeId;
@@ -281,6 +283,17 @@ resource TemporaryResource<S: AddressSpace> {
 }
 )";
 
+const char *kernelVariableSource = R"(
+kernel literal_initializers() {
+  const index feature_dim = 64;
+  f32 running_max = -infinity;
+  f32 running_sum = 0.0;
+  bool enabled = true;
+  i32 iteration = -1;
+  f32 scratch;
+}
+)";
+
 void tokenizesResourceDeclarations() {
   metreon::lexer::Lexer lexer(resourceSource);
   bool sawResource = false;
@@ -354,6 +367,100 @@ void tokenizesAccumulatorDeclarations() {
   }
   check(accumulatorCount == 2,
         "accumulator declarations were not tokenized as keywords");
+}
+
+void tokenizesKernelVariables() {
+  metreon::lexer::Lexer lexer(kernelVariableSource);
+  bool sawKernel = false;
+  bool sawConst = false;
+  bool sawEqual = false;
+  bool sawMinus = false;
+  bool sawInteger = false;
+  bool sawFloating = false;
+  bool sawBoolean = false;
+
+  while (true) {
+    const metreon::lexer::Token token = lexer.next();
+    sawKernel |= token.kind == metreon::lexer::TokenKind::KeywordKernel;
+    sawConst |= token.kind == metreon::lexer::TokenKind::KeywordConst;
+    sawEqual |= token.kind == metreon::lexer::TokenKind::Equal;
+    sawMinus |= token.kind == metreon::lexer::TokenKind::Minus;
+    sawInteger |= token.kind == metreon::lexer::TokenKind::IntegerLiteral;
+    sawFloating |= token.kind == metreon::lexer::TokenKind::FloatingLiteral;
+    sawBoolean |= token.kind == metreon::lexer::TokenKind::BooleanLiteral;
+    if (token.kind == metreon::lexer::TokenKind::EndOfFile) {
+      break;
+    }
+  }
+
+  check(sawKernel && sawConst && sawEqual && sawMinus && sawInteger &&
+            sawFloating && sawBoolean,
+        "kernel variable syntax was not fully tokenized");
+}
+
+void parsesAndLowersKernelVariables() {
+  const metreon::ast::Module module = parse(kernelVariableSource);
+  check(module.kernels.size() == 1,
+        "expected one kernel declaration");
+  const metreon::ast::KernelDeclaration &kernel = module.kernels.front();
+  check(kernel.name.str() == "literal_initializers" &&
+            kernel.variables.size() == 6,
+        "kernel name or local declarations were lost");
+
+  const auto &featureDim = kernel.variables[0];
+  const auto &runningMax = kernel.variables[1];
+  const auto &runningSum = kernel.variables[2];
+  const auto &enabled = kernel.variables[3];
+  const auto &iteration = kernel.variables[4];
+  const auto &scratch = kernel.variables[5];
+  check(featureDim.isConstant && featureDim.type.str() == "index" &&
+            featureDim.initializer &&
+            featureDim.initializer->kind == metreon::ast::LiteralKind::Integer &&
+            featureDim.initializer->value == "64",
+        "const integer declaration was not represented correctly");
+  check(runningMax.initializer &&
+            runningMax.initializer->kind == metreon::ast::LiteralKind::Infinity &&
+            runningMax.initializer->value == "-infinity",
+        "signed infinity initializer was not represented correctly");
+  check(runningSum.initializer &&
+            runningSum.initializer->kind == metreon::ast::LiteralKind::Floating &&
+            runningSum.initializer->value == "0.0",
+        "floating initializer was not represented correctly");
+  check(enabled.initializer &&
+            enabled.initializer->kind == metreon::ast::LiteralKind::Boolean &&
+            enabled.initializer->value == "true",
+        "boolean initializer was not represented correctly");
+  check(iteration.initializer && iteration.initializer->value == "-1",
+        "signed integer initializer was not represented correctly");
+  check(!scratch.isConstant && !scratch.initializer,
+        "uninitialized mutable declaration was not preserved");
+
+  const Module graph =
+      metreon::graphir::lowerModule(module, "kernel-variables.mtr");
+  check(graph.kernelGraphs().size() == 1,
+        "kernel GraphIR section was not emitted");
+  const KernelGraph &kernelGraph = graph.kernelGraphs().front();
+  check(kernelGraph.name() == "literal_initializers" &&
+            kernelGraph.variables().size() == 6,
+        "kernel GraphIR lost its declaration or local variables");
+  const KernelVariableNode &maxNode = kernelGraph.variables()[1];
+  check(maxNode.name == "running_max" &&
+            maxNode.attributes.at("type") == "f32" &&
+            maxNode.attributes.at("mutability") == "mutable" &&
+            maxNode.attributes.at("storage") == "automatic" &&
+            maxNode.attributes.at("initializer.kind") == "infinity" &&
+            maxNode.attributes.at("initializer.value") == "-infinity",
+        "kernel variable GraphIR metadata was incomplete");
+
+  const std::string printed = graph.print();
+  check(printed.find("graphir.kernel @\"literal_initializers\"") !=
+            std::string::npos &&
+            printed.find("graphir.variable_decl \"running_max\"") !=
+                std::string::npos &&
+            printed.find("initializer.kind = \"infinity\"") !=
+                std::string::npos &&
+            printed.find("initialized = \"false\"") != std::string::npos,
+        "textual GraphIR omitted kernel variable declarations");
 }
 
 void parsesResourceDeclarations() {
@@ -1086,8 +1193,33 @@ void diagnosesInvalidInput() {
         metreon::graphir::lowerContexts(module, "bad-defer.mtr"));
   });
 
-  expectDiagnostic("parse.expected_context", [] {
+  expectDiagnostic("parse.expected_declaration", [] {
     static_cast<void>(parse("fn acknowledge() {}"));
+  });
+
+  expectDiagnostic("sema.duplicate_kernel", [] {
+    const auto module = parse("kernel work() {} kernel work() {}");
+    static_cast<void>(metreon::graphir::lowerModule(module, "duplicate-kernel.mtr"));
+  });
+
+  expectDiagnostic("sema.duplicate_kernel_variable", [] {
+    const auto module = parse("kernel work() { i32 value; f32 value; }");
+    static_cast<void>(
+        metreon::graphir::lowerModule(module, "duplicate-variable.mtr"));
+  });
+
+  expectDiagnostic("sema.uninitialized_const_variable", [] {
+    const auto module = parse("kernel work() { const i32 value; }");
+    static_cast<void>(
+        metreon::graphir::lowerModule(module, "uninitialized-const.mtr"));
+  });
+
+  expectDiagnostic("parse.expected_literal_initializer", [] {
+    static_cast<void>(parse("kernel work() { f32 value = other; }"));
+  });
+
+  expectDiagnostic("parse.invalid_signed_literal", [] {
+    static_cast<void>(parse("kernel work() { bool value = -true; }"));
   });
 
   expectDiagnostic("lex.unexpected_character", [] {
@@ -1162,8 +1294,10 @@ int main() {
   const std::vector<std::pair<std::string, std::function<void()>>> tests = {
       {"tokenizes resource declarations", tokenizesResourceDeclarations},
       {"tokenizes accumulator declarations", tokenizesAccumulatorDeclarations},
+      {"tokenizes kernel variables", tokenizesKernelVariables},
       {"parses resource declarations", parsesResourceDeclarations},
       {"parses and lowers accumulators", parsesAndLowersAccumulators},
+      {"parses and lowers kernel variables", parsesAndLowersKernelVariables},
       {"accepts all accumulator scopes", acceptsAllAccumulatorScopes},
       {"lowers resources as separate graphs", lowersResourcesAsSeparateGraphs},
       {"emits non-fatal context template checks",

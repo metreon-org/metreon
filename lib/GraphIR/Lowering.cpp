@@ -22,6 +22,20 @@ using ContextTypeMap =
 using ResourceStateMap =
     std::unordered_map<std::string, ResourceNodeId>;
 
+const char *literalKindName(ast::LiteralKind kind) {
+  switch (kind) {
+  case ast::LiteralKind::Integer:
+    return "integer";
+  case ast::LiteralKind::Floating:
+    return "floating";
+  case ast::LiteralKind::Boolean:
+    return "boolean";
+  case ast::LiteralKind::Infinity:
+    return "infinity";
+  }
+  return "unknown";
+}
+
 std::string joinTypeReferences(
     const std::vector<ast::TypeReference> &references) {
   std::ostringstream output;
@@ -226,6 +240,29 @@ void lowerResources(const ast::Module &sourceModule, Module &module) {
   }
 }
 
+void lowerKernels(const ast::Module &sourceModule, Module &module) {
+  for (const ast::KernelDeclaration &kernel : sourceModule.kernels) {
+    KernelGraph &graph =
+        module.addKernelGraph(kernel.name.str(), kernel.location);
+
+    for (const ast::VariableDeclaration &variable : kernel.variables) {
+      std::map<std::string, std::string> attributes = {
+          {"initialized", variable.initializer.has_value() ? "true" : "false"},
+          {"mutability", variable.isConstant ? "const" : "mutable"},
+          {"storage", "automatic"},
+          {"type", variable.type.str()},
+      };
+      if (variable.initializer.has_value()) {
+        attributes.emplace("initializer.kind",
+                           literalKindName(variable.initializer->kind));
+        attributes.emplace("initializer.value", variable.initializer->value);
+      }
+      graph.addVariable(variable.name, std::move(attributes),
+                        variable.location);
+    }
+  }
+}
+
 bool contextHasGrant(const Module &module,
                      const ContextMetadataRef &context,
                      const std::string &requiredCapability) {
@@ -347,6 +384,7 @@ void lowerResourceContextTemplates(const ast::Module &sourceModule,
 Module lowerModule(const ast::Module &sourceModule, std::string sourceName) {
   sema::validateContexts(sourceModule);
   sema::validateResources(sourceModule);
+  sema::validateKernels(sourceModule);
 
   Module graph(std::move(sourceName));
   ContextMap contextsByIdentifier;
@@ -406,6 +444,7 @@ Module lowerModule(const ast::Module &sourceModule, std::string sourceName) {
     }
   }
 
+  lowerKernels(sourceModule, graph);
   lowerResources(sourceModule, graph);
   lowerResourceContextTemplates(sourceModule, graph, contextsByIdentifier);
 

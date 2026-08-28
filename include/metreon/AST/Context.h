@@ -3,6 +3,7 @@
 #include "metreon/Basic/SourceLocation.h"
 
 #include <sstream>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -105,6 +106,33 @@ struct ValueType {
   }
 };
 
+enum class LiteralKind {
+  Integer,
+  Floating,
+  Boolean,
+  Infinity,
+};
+
+struct LiteralInitializer {
+  LiteralKind kind = LiteralKind::Integer;
+  std::string value;
+  SourceLocation location;
+};
+
+struct VariableDeclaration {
+  ValueType type;
+  std::string name;
+  bool isConstant = false;
+  std::optional<LiteralInitializer> initializer;
+  SourceLocation location;
+};
+
+struct KernelDeclaration {
+  QualifiedName name;
+  std::vector<VariableDeclaration> variables;
+  SourceLocation location;
+};
+
 struct ResourceField {
   std::string name;
   ValueType type;
@@ -178,6 +206,7 @@ struct ResourceDeclaration {
 struct Module {
   std::vector<ContextDeclaration> contexts;
   std::vector<ResourceDeclaration> resources;
+  std::vector<KernelDeclaration> kernels;
 };
 
 } // namespace metreon::ast

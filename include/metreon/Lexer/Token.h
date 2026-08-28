@@ -9,9 +9,14 @@ namespace metreon::lexer {
 enum class TokenKind {
   EndOfFile,
   Identifier,
+  IntegerLiteral,
+  FloatingLiteral,
+  BooleanLiteral,
   KeywordContext,
   KeywordGrants,
   KeywordResource,
+  KeywordKernel,
+  KeywordConst,
   KeywordState,
   KeywordAccumulator,
   KeywordTransition,
@@ -31,6 +36,8 @@ enum class TokenKind {
   Semicolon,
   At,
   Bang,
+  Equal,
+  Minus,
   Arrow,
 };
 
