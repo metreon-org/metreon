@@ -57,6 +57,10 @@ if(BUILD_TESTING)
         NAME metreon.frontend.accumulator.cli
         COMMAND metreonc --emit=graphir ${CMAKE_CURRENT_SOURCE_DIR}/examples/accumulators.mtr
     )
+    add_test(
+        NAME metreon.frontend.kernel.cli
+        COMMAND metreonc --emit=graphir ${CMAKE_CURRENT_SOURCE_DIR}/examples/kernel_variables.mtr
+    )
     set_tests_properties(
         metreon.frontend.cli
         PROPERTIES PASS_REGULAR_EXPRESSION "graphir.context_metadata.*context_key"
@@ -68,5 +72,9 @@ if(BUILD_TESTING)
     set_tests_properties(
         metreon.frontend.accumulator.cli
         PROPERTIES PASS_REGULAR_EXPRESSION "graphir.resource_state.*accumulator.*device"
+    )
+    set_tests_properties(
+        metreon.frontend.kernel.cli
+        PROPERTIES PASS_REGULAR_EXPRESSION "graphir.variable_decl.*initializer.kind.*infinity"
     )
 endif()

@@ -220,6 +220,36 @@ private:
   std::vector<ContextTemplateSpecialization> specializations_;
 };
 
+using KernelVariableId = std::size_t;
+
+struct KernelVariableNode {
+  KernelVariableId id = 0;
+  std::string name;
+  std::map<std::string, std::string> attributes;
+  SourceLocation location;
+};
+
+class KernelGraph {
+public:
+  KernelGraph(std::string name, SourceLocation location)
+      : name_(std::move(name)), location_(location) {}
+
+  KernelVariableId addVariable(
+      std::string name, std::map<std::string, std::string> attributes,
+      SourceLocation location);
+
+  const std::string &name() const noexcept { return name_; }
+  const SourceLocation &location() const noexcept { return location_; }
+  const std::vector<KernelVariableNode> &variables() const noexcept {
+    return variables_;
+  }
+
+private:
+  std::string name_;
+  SourceLocation location_;
+  std::vector<KernelVariableNode> variables_;
+};
+
 class Module {
 public:
   explicit Module(std::string sourceName);
@@ -248,6 +278,7 @@ public:
   ResourceContextTemplate &addResourceContextTemplate(
       std::string resourceName, std::string contextParameter,
       SourceLocation location);
+  KernelGraph &addKernelGraph(std::string name, SourceLocation location);
 
   // This is the enforcement point future runtime lowerings must use before
   // consuming context evidence. Every runtime-oriented use is rejected.
@@ -266,6 +297,9 @@ public:
       const noexcept {
     return resourceContextTemplates_;
   }
+  const std::vector<KernelGraph> &kernelGraphs() const noexcept {
+    return kernelGraphs_;
+  }
   const std::string &sourceName() const noexcept { return sourceName_; }
 
   std::string print() const;
@@ -280,6 +314,7 @@ private:
   std::vector<Edge> edges_;
   std::vector<ResourceGraph> resourceGraphs_;
   std::vector<ResourceContextTemplate> resourceContextTemplates_;
+  std::vector<KernelGraph> kernelGraphs_;
 };
 
 const char *nodeKindName(NodeKind kind);

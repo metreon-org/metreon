@@ -19,11 +19,98 @@ ast::Module Parser::parseModule() {
       module.resources.push_back(parseResourceDeclaration());
       continue;
     }
-    fail("parse.expected_context",
-         "expected a context or resource declaration, found " +
+    if (current_.kind == lexer::TokenKind::KeywordKernel) {
+      module.kernels.push_back(parseKernelDeclaration());
+      continue;
+    }
+    fail("parse.expected_declaration",
+         "expected a context, resource, or kernel declaration, found " +
              std::string(lexer::tokenKindName(current_.kind)));
   }
   return module;
+}
+
+ast::KernelDeclaration Parser::parseKernelDeclaration() {
+  const lexer::Token kernelToken =
+      expect(lexer::TokenKind::KeywordKernel, "`kernel`");
+  ast::KernelDeclaration declaration;
+  declaration.location = kernelToken.location;
+  declaration.name = parseQualifiedName();
+
+  expect(lexer::TokenKind::LeftParen, "`(` after the kernel name");
+  expect(lexer::TokenKind::RightParen,
+         "`)` after the empty kernel parameter list");
+  expect(lexer::TokenKind::LeftBrace, "`{` before the kernel body");
+
+  while (current_.kind != lexer::TokenKind::RightBrace) {
+    if (current_.kind == lexer::TokenKind::EndOfFile) {
+      fail("parse.unterminated_kernel",
+           "expected `}` before the end of the kernel declaration");
+    }
+    declaration.variables.push_back(parseVariableDeclaration());
+  }
+
+  expect(lexer::TokenKind::RightBrace, "`}` after the kernel body");
+  consume(lexer::TokenKind::Semicolon);
+  return declaration;
+}
+
+ast::VariableDeclaration Parser::parseVariableDeclaration() {
+  ast::VariableDeclaration declaration;
+  declaration.location = current_.location;
+  declaration.isConstant = consume(lexer::TokenKind::KeywordConst);
+  declaration.type = parseValueType();
+
+  const lexer::Token name =
+      expect(lexer::TokenKind::Identifier, "a variable name after its type");
+  declaration.name = name.text;
+  declaration.location = name.location;
+
+  if (consume(lexer::TokenKind::Equal)) {
+    declaration.initializer = parseLiteralInitializer();
+  }
+
+  expect(lexer::TokenKind::Semicolon, "`;` after the variable declaration");
+  return declaration;
+}
+
+ast::LiteralInitializer Parser::parseLiteralInitializer() {
+  const SourceLocation location = current_.location;
+  const bool isNegative = consume(lexer::TokenKind::Minus);
+
+  if (current_.kind == lexer::TokenKind::IntegerLiteral ||
+      current_.kind == lexer::TokenKind::FloatingLiteral) {
+    const lexer::Token literal = current_;
+    advance();
+    return ast::LiteralInitializer{
+        literal.kind == lexer::TokenKind::IntegerLiteral
+            ? ast::LiteralKind::Integer
+            : ast::LiteralKind::Floating,
+        std::string(isNegative ? "-" : "") + literal.text, location};
+  }
+
+  if (current_.kind == lexer::TokenKind::BooleanLiteral) {
+    if (isNegative) {
+      fail("parse.invalid_signed_literal",
+           "boolean literals cannot have a leading `-`");
+    }
+    const lexer::Token literal = current_;
+    advance();
+    return ast::LiteralInitializer{ast::LiteralKind::Boolean, literal.text,
+                                   location};
+  }
+
+  if (current_.kind == lexer::TokenKind::Identifier &&
+      current_.text == "infinity") {
+    const lexer::Token literal = current_;
+    advance();
+    return ast::LiteralInitializer{
+        ast::LiteralKind::Infinity,
+        std::string(isNegative ? "-" : "") + literal.text, location};
+  }
+
+  fail("parse.expected_literal_initializer",
+       "expected an integer, floating-point, boolean, or infinity literal");
 }
 
 ast::ContextDeclaration Parser::parseContextDeclaration() {

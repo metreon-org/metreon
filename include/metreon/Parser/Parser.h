@@ -17,6 +17,9 @@ public:
 private:
   ast::ContextDeclaration parseContextDeclaration();
   ast::ResourceDeclaration parseResourceDeclaration();
+  ast::KernelDeclaration parseKernelDeclaration();
+  ast::VariableDeclaration parseVariableDeclaration();
+  ast::LiteralInitializer parseLiteralInitializer();
   ast::ResourceStateDeclaration parseResourceStateDeclaration();
   ast::ResourceAccumulatorDeclaration parseResourceAccumulatorDeclaration();
   ast::ResourceTransitionDeclaration parseResourceTransitionDeclaration();

@@ -136,7 +136,8 @@ Module::Module(Module &&other) noexcept
       edges_(std::move(other.edges_)),
       resourceGraphs_(std::move(other.resourceGraphs_)),
       resourceContextTemplates_(
-          std::move(other.resourceContextTemplates_)) {
+          std::move(other.resourceContextTemplates_)),
+      kernelGraphs_(std::move(other.kernelGraphs_)) {
   // Keep a moved-from module valid without letting it mint duplicate keys.
   other.sourceName_.clear();
   other.contexts_.clear();
@@ -144,6 +145,7 @@ Module::Module(Module &&other) noexcept
   other.edges_.clear();
   other.resourceGraphs_.clear();
   other.resourceContextTemplates_.clear();
+  other.kernelGraphs_.clear();
   other.moduleIdentity_ = mintModuleIdentity();
 }
 
@@ -159,12 +161,14 @@ Module &Module::operator=(Module &&other) noexcept {
   edges_ = std::move(other.edges_);
   resourceGraphs_ = std::move(other.resourceGraphs_);
   resourceContextTemplates_ = std::move(other.resourceContextTemplates_);
+  kernelGraphs_ = std::move(other.kernelGraphs_);
   other.sourceName_.clear();
   other.contexts_.clear();
   other.nodes_.clear();
   other.edges_.clear();
   other.resourceGraphs_.clear();
   other.resourceContextTemplates_.clear();
+  other.kernelGraphs_.clear();
   other.moduleIdentity_ = mintModuleIdentity();
   return *this;
 }
@@ -175,6 +179,15 @@ ResourceNodeId ResourceGraph::addState(
   const ResourceNodeId id = states_.size();
   states_.push_back(ResourceStateNode{id, std::move(name),
                                       std::move(attributes), location});
+  return id;
+}
+
+KernelVariableId KernelGraph::addVariable(
+    std::string name, std::map<std::string, std::string> attributes,
+    SourceLocation location) {
+  const KernelVariableId id = variables_.size();
+  variables_.push_back(KernelVariableNode{
+      id, std::move(name), std::move(attributes), location});
   return id;
 }
 
@@ -279,6 +292,12 @@ ResourceContextTemplate &Module::addResourceContextTemplate(
   return resourceContextTemplates_.back();
 }
 
+KernelGraph &Module::addKernelGraph(std::string name,
+                                    SourceLocation location) {
+  kernelGraphs_.emplace_back(std::move(name), location);
+  return kernelGraphs_.back();
+}
+
 std::string Module::print() const {
   std::ostringstream output;
   output << "graphir.module {\n";
@@ -353,6 +372,28 @@ std::string Module::print() const {
   }
 
   output << "  }\n";
+
+  for (std::size_t kernelIndex = 0; kernelIndex < kernelGraphs_.size();
+       ++kernelIndex) {
+    const KernelGraph &kernel = kernelGraphs_[kernelIndex];
+    output << '\n';
+    output << "  graphir.kernel @\"" << escapeString(kernel.name()) << "\"";
+    output << " loc(\"" << escapeString(sourceName_) << "\":"
+           << kernel.location().line << ':' << kernel.location().column
+           << ") {\n";
+
+    for (const KernelVariableNode &variable : kernel.variables()) {
+      output << "    %k" << kernelIndex << "v" << variable.id
+             << " = graphir.variable_decl \""
+             << escapeString(variable.name) << '\"';
+      printAttributes(output, variable.attributes);
+      output << " loc(\"" << escapeString(sourceName_) << "\":"
+             << variable.location.line << ':' << variable.location.column
+             << ")\n";
+    }
+
+    output << "  }\n";
+  }
 
   for (const ResourceGraph &resource : resourceGraphs_) {
     output << '\n';

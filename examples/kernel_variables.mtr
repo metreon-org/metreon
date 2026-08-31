@@ -1,0 +1,8 @@
+kernel literal_initializers() {
+  const index feature_dim = 64;
+  f32 running_max = -infinity;
+  f32 running_sum = 0.0;
+  bool enabled = true;
+  i32 iteration = -1;
+  f32 scratch;
+}

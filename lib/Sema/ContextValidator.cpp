@@ -205,4 +205,36 @@ void validateResources(const ast::Module &module) {
   }
 }
 
+void validateKernels(const ast::Module &module) {
+  std::unordered_set<std::string> kernelNames;
+
+  for (const ast::KernelDeclaration &kernel : module.kernels) {
+    const std::string kernelName = kernel.name.str();
+    if (!kernelNames.insert(kernelName).second) {
+      throw DiagnosticError({"sema.duplicate_kernel",
+                             "duplicate kernel declaration `" + kernelName +
+                                 "`",
+                             kernel.location});
+    }
+
+    std::unordered_set<std::string> variableNames;
+    for (const ast::VariableDeclaration &variable : kernel.variables) {
+      if (!variableNames.insert(variable.name).second) {
+        throw DiagnosticError(
+            {"sema.duplicate_kernel_variable",
+             "duplicate variable `" + variable.name + "` in kernel `" +
+                 kernelName + "`",
+             variable.location});
+      }
+      if (variable.isConstant && !variable.initializer.has_value()) {
+        throw DiagnosticError(
+            {"sema.uninitialized_const_variable",
+             "const variable `" + variable.name + "` in kernel `" +
+                 kernelName + "` requires an initializer",
+             variable.location});
+      }
+    }
+  }
+}
+
 } // namespace metreon::sema

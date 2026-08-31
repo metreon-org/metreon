@@ -9,11 +9,31 @@ cmake --build build --parallel
 ./build/metreonc --emit=graphir examples/contexts.mtr
 ./build/metreonc --emit=graphir examples/resources.mtr
 ./build/metreonc --emit=graphir examples/accumulators.mtr
+./build/metreonc --emit=graphir examples/kernel_variables.mtr
 ```
 
 The current compiler parses and validates `.mtr` context declarations and
 resource state machines, then emits textual GraphIR with separate context and
 resource graphs. It does not yet generate or execute runtime or GPU code.
+
+The frontend also accepts a deliberately minimal kernel body for C++-style
+local declarations and literal initialization:
+
+```metreon
+kernel literal_initializers() {
+  const index feature_dim = 64;
+  f32 running_max = -infinity;
+  bool enabled = true;
+  f32 scratch;
+}
+```
+
+Each local is emitted as a scoped `graphir.variable_decl` in a separate
+`graphir.kernel` section, with type, mutability, automatic storage, initialized
+state, and structured literal metadata. Initializers currently support integer,
+floating-point, boolean, and signed `infinity` literals. Kernel parameters,
+return types, assignments, expression initializers, control flow, and lowering
+to MLIR are not yet supported.
 
 Resource GraphIR ends with a template section that maps each transition context
 parameter to every locally declared context. Each mapping records a non-fatal
