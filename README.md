@@ -58,6 +58,13 @@ declaration with `accumulator State(scope);`. Supported scopes are `thread`,
 `warp`, `block`, `device`, `cluster`, and `host::pinned`. GraphIR records the
 selected scope in the corresponding `graphir.resource_state` metadata.
 
+The first declared state is the resource entry state. GraphIR emission rejects
+any state that cannot be reached from it through resource transitions. An
+`await transition` must consume a source state containing an
+`own event<...>` field and must provide matching `@cx: C` evidence for a
+`C: Context` parameter with `where C allows {gpu_await}`. The transition effect
+list is not part of this await-evidence check yet.
+
 ## Context evidence
 
 GraphIR represents a context as immutable compiler metadata, not as a graph node

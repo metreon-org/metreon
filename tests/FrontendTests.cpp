@@ -568,6 +568,12 @@ resource ScopeResource<S: AddressSpace> {
   accumulator DeviceState(device);
   accumulator ClusterState(cluster);
   accumulator HostPinnedState(host::pinned);
+
+  transition to_warp(self: own ThreadState) -> WarpState;
+  transition to_block(self: own WarpState) -> BlockState;
+  transition to_device(self: own BlockState) -> DeviceState;
+  transition to_cluster(self: own DeviceState) -> ClusterState;
+  transition to_host(self: own ClusterState) -> HostPinnedState;
 }
 )";
   const Module graph = metreon::graphir::lowerModule(
@@ -689,7 +695,7 @@ context Gpu::WrongGeneric grants {
 context Host::None grants {} none;
 
 resource Slot {
-  state Ready();
+  state Ready(ticket: own event<Copy>);
 
   transition use<C: Context>(
     @cx: C;
@@ -1159,6 +1165,86 @@ void resolvesRepeatedContextTypesByIdentifier() {
         "context identifier did not select the intended same-type target");
 }
 
+void enforcesResourceStateReachability() {
+  expectDiagnostic("sema.unreachable_resource_state", [] {
+    const auto module = parse(R"(
+resource Slot {
+  state Entry();
+  state Reachable();
+  state Dead();
+  transition advance(self: own Entry) -> Reachable;
+}
+)");
+    static_cast<void>(
+        metreon::graphir::lowerModule(module, "unreachable-state.mtr"));
+  });
+}
+
+void enforcesAwaitEvidence() {
+  const auto valid = parse(R"(
+context Gpu::Await grants { gpu_await } await_ctx;
+resource Slot {
+  state Pending(ticket: own event<Copy>);
+  state Ready();
+  await transition complete<C: Context>(
+    @cx: C;
+    self: own Pending
+  ) -> Ready
+  where C allows {gpu_await};
+}
+)");
+  static_cast<void>(
+      metreon::graphir::lowerModule(valid, "valid-await-evidence.mtr"));
+
+  expectDiagnostic("sema.await_missing_event_evidence", [] {
+    const auto module = parse(R"(
+resource Slot {
+  state Pending(ticket: event<Copy>);
+  state Ready();
+  await transition complete<C: Context>(
+    @cx: C;
+    self: own Pending
+  ) -> Ready
+  where C allows {gpu_await};
+}
+)");
+    static_cast<void>(
+        metreon::graphir::lowerModule(module, "missing-event-evidence.mtr"));
+  });
+
+  expectDiagnostic("sema.await_missing_capability_evidence", [] {
+    const auto module = parse(R"(
+resource Slot {
+  state Pending(ticket: own event<Copy>);
+  state Ready();
+  await transition complete<C: Context>(
+    @cx: C;
+    self: own Pending
+  ) -> Ready
+  where C allows {gpu_store};
+}
+)");
+    static_cast<void>(metreon::graphir::lowerModule(
+        module, "missing-capability-evidence.mtr"));
+  });
+
+  expectDiagnostic("sema.await_missing_capability_evidence", [] {
+    const auto module = parse(R"(
+resource Slot {
+  state Pending(ticket: own event<Copy>);
+  state Ready();
+  await transition complete<C: Context>(
+    @cx: Wrong;
+    self: own Pending
+  ) -> Ready
+  where C allows {gpu_await};
+}
+)");
+    static_cast<void>(metreon::graphir::lowerModule(
+        module, "mismatched-capability-evidence.mtr"));
+  });
+}
+
 void diagnosesInvalidInput() {
   expectDiagnostic("parse.expected_context_identifier", [] {
     static_cast<void>(parse("context Host::Process grants {};"));
@@ -1313,6 +1399,9 @@ int main() {
       {"preserves external transition targets", preservesExternalTransitionTargets},
       {"resolves repeated context types by identifier",
        resolvesRepeatedContextTypesByIdentifier},
+      {"enforces resource state reachability",
+       enforcesResourceStateReachability},
+      {"enforces await evidence", enforcesAwaitEvidence},
       {"diagnoses invalid input", diagnosesInvalidInput},
   };
 
