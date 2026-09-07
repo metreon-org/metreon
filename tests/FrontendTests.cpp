@@ -21,7 +21,7 @@ using metreon::graphir::ContextUse;
 using metreon::graphir::Edge;
 using metreon::graphir::EdgeKind;
 using metreon::graphir::KernelGraph;
-using metreon::graphir::KernelVariableNode;
+using metreon::graphir::CallableOperation;
 using metreon::graphir::Module;
 using metreon::graphir::Node;
 using metreon::graphir::NodeId;
@@ -404,33 +404,33 @@ void parsesAndLowersKernelVariables() {
         "expected one kernel declaration");
   const metreon::ast::KernelDeclaration &kernel = module.kernels.front();
   check(kernel.name.str() == "literal_initializers" &&
-            kernel.variables.size() == 6,
+            kernel.body.statements.size() == 6,
         "kernel name or local declarations were lost");
 
-  const auto &featureDim = kernel.variables[0];
-  const auto &runningMax = kernel.variables[1];
-  const auto &runningSum = kernel.variables[2];
-  const auto &enabled = kernel.variables[3];
-  const auto &iteration = kernel.variables[4];
-  const auto &scratch = kernel.variables[5];
+  const auto &featureDim = kernel.body.statements[0].variable;
+  const auto &runningMax = kernel.body.statements[1].variable;
+  const auto &runningSum = kernel.body.statements[2].variable;
+  const auto &enabled = kernel.body.statements[3].variable;
+  const auto &iteration = kernel.body.statements[4].variable;
+  const auto &scratch = kernel.body.statements[5].variable;
   check(featureDim.isConstant && featureDim.type.str() == "index" &&
             featureDim.initializer &&
-            featureDim.initializer->kind == metreon::ast::LiteralKind::Integer &&
-            featureDim.initializer->value == "64",
+            featureDim.initializer->literal.kind == metreon::ast::LiteralKind::Integer &&
+            featureDim.initializer->literal.value == "64",
         "const integer declaration was not represented correctly");
   check(runningMax.initializer &&
-            runningMax.initializer->kind == metreon::ast::LiteralKind::Infinity &&
-            runningMax.initializer->value == "-infinity",
+            runningMax.initializer->literal.kind == metreon::ast::LiteralKind::Infinity &&
+            runningMax.initializer->literal.value == "-infinity",
         "signed infinity initializer was not represented correctly");
   check(runningSum.initializer &&
-            runningSum.initializer->kind == metreon::ast::LiteralKind::Floating &&
-            runningSum.initializer->value == "0.0",
+            runningSum.initializer->literal.kind == metreon::ast::LiteralKind::Floating &&
+            runningSum.initializer->literal.value == "0.0",
         "floating initializer was not represented correctly");
   check(enabled.initializer &&
-            enabled.initializer->kind == metreon::ast::LiteralKind::Boolean &&
-            enabled.initializer->value == "true",
+            enabled.initializer->literal.kind == metreon::ast::LiteralKind::Boolean &&
+            enabled.initializer->literal.value == "true",
         "boolean initializer was not represented correctly");
-  check(iteration.initializer && iteration.initializer->value == "-1",
+  check(iteration.initializer && iteration.initializer->literal.value == "-1",
         "signed integer initializer was not represented correctly");
   check(!scratch.isConstant && !scratch.initializer,
         "uninitialized mutable declaration was not preserved");
@@ -441,9 +441,9 @@ void parsesAndLowersKernelVariables() {
         "kernel GraphIR section was not emitted");
   const KernelGraph &kernelGraph = graph.kernelGraphs().front();
   check(kernelGraph.name() == "literal_initializers" &&
-            kernelGraph.variables().size() == 6,
+            kernelGraph.body().size() == 6,
         "kernel GraphIR lost its declaration or local variables");
-  const KernelVariableNode &maxNode = kernelGraph.variables()[1];
+  const CallableOperation &maxNode = kernelGraph.body()[1];
   check(maxNode.name == "running_max" &&
             maxNode.attributes.at("type") == "f32" &&
             maxNode.attributes.at("mutability") == "mutable" &&
@@ -1300,8 +1300,9 @@ void diagnosesInvalidInput() {
         metreon::graphir::lowerModule(module, "uninitialized-const.mtr"));
   });
 
-  expectDiagnostic("parse.expected_literal_initializer", [] {
-    static_cast<void>(parse("kernel work() { f32 value = other; }"));
+  expectDiagnostic("sema.unknown_variable", [] {
+    static_cast<void>(metreon::graphir::lowerModule(
+        parse("kernel work() { f32 value = other; }"), "unknown-variable.mtr"));
   });
 
   expectDiagnostic("parse.invalid_signed_literal", [] {

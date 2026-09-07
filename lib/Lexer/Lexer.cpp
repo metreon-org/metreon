@@ -41,6 +41,10 @@ const char *tokenKindName(TokenKind kind) {
     return "`resource`";
   case TokenKind::KeywordKernel:
     return "`kernel`";
+  case TokenKind::KeywordProcedure:
+    return "`procedure`";
+  case TokenKind::KeywordReturn:
+    return "`return`";
   case TokenKind::KeywordConst:
     return "`const`";
   case TokenKind::KeywordState:
@@ -182,6 +186,10 @@ Token Lexer::lexIdentifier() {
     kind = TokenKind::KeywordResource;
   } else if (text == "kernel") {
     kind = TokenKind::KeywordKernel;
+  } else if (text == "procedure") {
+    kind = TokenKind::KeywordProcedure;
+  } else if (text == "return") {
+    kind = TokenKind::KeywordReturn;
   } else if (text == "const") {
     kind = TokenKind::KeywordConst;
   } else if (text == "state") {
