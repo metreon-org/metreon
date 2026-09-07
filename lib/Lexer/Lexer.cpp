@@ -27,12 +27,26 @@ const char *tokenKindName(TokenKind kind) {
     return "end of file";
   case TokenKind::Identifier:
     return "identifier";
+  case TokenKind::IntegerLiteral:
+    return "integer literal";
+  case TokenKind::FloatingLiteral:
+    return "floating-point literal";
+  case TokenKind::BooleanLiteral:
+    return "boolean literal";
   case TokenKind::KeywordContext:
     return "`context`";
   case TokenKind::KeywordGrants:
     return "`grants`";
   case TokenKind::KeywordResource:
     return "`resource`";
+  case TokenKind::KeywordKernel:
+    return "`kernel`";
+  case TokenKind::KeywordProcedure:
+    return "`procedure`";
+  case TokenKind::KeywordReturn:
+    return "`return`";
+  case TokenKind::KeywordConst:
+    return "`const`";
   case TokenKind::KeywordState:
     return "`state`";
   case TokenKind::KeywordAccumulator:
@@ -71,6 +85,10 @@ const char *tokenKindName(TokenKind kind) {
     return "`@`";
   case TokenKind::Bang:
     return "`!`";
+  case TokenKind::Equal:
+    return "`=`";
+  case TokenKind::Minus:
+    return "`-`";
   case TokenKind::Arrow:
     return "`->`";
   }
@@ -166,6 +184,14 @@ Token Lexer::lexIdentifier() {
     kind = TokenKind::KeywordGrants;
   } else if (text == "resource") {
     kind = TokenKind::KeywordResource;
+  } else if (text == "kernel") {
+    kind = TokenKind::KeywordKernel;
+  } else if (text == "procedure") {
+    kind = TokenKind::KeywordProcedure;
+  } else if (text == "return") {
+    kind = TokenKind::KeywordReturn;
+  } else if (text == "const") {
+    kind = TokenKind::KeywordConst;
   } else if (text == "state") {
     kind = TokenKind::KeywordState;
   } else if (text == "accumulator") {
@@ -180,8 +206,48 @@ Token Lexer::lexIdentifier() {
     kind = TokenKind::KeywordAllows;
   } else if (text == "own") {
     kind = TokenKind::KeywordOwn;
+  } else if (text == "true" || text == "false") {
+    kind = TokenKind::BooleanLiteral;
   }
   return Token{kind, std::move(text), start};
+}
+
+Token Lexer::lexNumber() {
+  const SourceLocation start{offset_, line_, column_};
+  const std::size_t begin = offset_;
+  bool isFloating = false;
+
+  while (std::isdigit(static_cast<unsigned char>(current())) != 0) {
+    advance();
+  }
+
+  if (current() == '.' &&
+      std::isdigit(static_cast<unsigned char>(peek())) != 0) {
+    isFloating = true;
+    advance();
+    while (std::isdigit(static_cast<unsigned char>(current())) != 0) {
+      advance();
+    }
+  }
+
+  if (current() == 'e' || current() == 'E') {
+    isFloating = true;
+    advance();
+    if (current() == '+' || current() == '-') {
+      advance();
+    }
+    if (std::isdigit(static_cast<unsigned char>(current())) == 0) {
+      throw DiagnosticError(
+          {"lex.malformed_number", "expected exponent digits", start});
+    }
+    while (std::isdigit(static_cast<unsigned char>(current())) != 0) {
+      advance();
+    }
+  }
+
+  return Token{isFloating ? TokenKind::FloatingLiteral
+                          : TokenKind::IntegerLiteral,
+               std::string(source_.substr(begin, offset_ - begin)), start};
 }
 
 Token Lexer::punctuation(TokenKind kind, std::size_t length) {
@@ -201,6 +267,10 @@ Token Lexer::next() {
 
   if (isIdentifierStart(current())) {
     return lexIdentifier();
+  }
+
+  if (std::isdigit(static_cast<unsigned char>(current())) != 0) {
+    return lexNumber();
   }
 
   switch (current()) {
@@ -229,11 +299,13 @@ Token Lexer::next() {
     return punctuation(TokenKind::At);
   case '!':
     return punctuation(TokenKind::Bang);
+  case '=':
+    return punctuation(TokenKind::Equal);
   case '-':
     if (peek() == '>') {
       return punctuation(TokenKind::Arrow, 2);
     }
-    break;
+    return punctuation(TokenKind::Minus);
   default:
     break;
   }

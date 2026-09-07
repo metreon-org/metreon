@@ -1,12 +1,74 @@
 #include "metreon/Sema/ContextValidator.h"
+#include "metreon/Sema/CallableValidator.h"
 
 #include "metreon/Basic/Diagnostic.h"
 
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace metreon::sema {
+
+namespace {
+
+bool isSimpleTypeNamed(const ast::TypeReference &type,
+                       const std::string &name) {
+  return type.arguments.empty() && type.name.components.size() == 1 &&
+         type.name.components.front() == name;
+}
+
+bool hasOwnedEventEvidence(const ast::ResourceStateDeclaration &state) {
+  for (const ast::ResourceField &field : state.fields) {
+    if (field.type.ownership == ast::OwnershipQualifier::Own &&
+        field.type.reference.name.str() == "event" &&
+        !field.type.reference.arguments.empty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool hasAwaitCapabilityEvidence(
+    const ast::ResourceTransitionDeclaration &transition) {
+  for (const ast::TransitionParameter &evidence : transition.parameters) {
+    if (!evidence.isContextEvidence || evidence.name != "cx" ||
+        evidence.type.ownership != ast::OwnershipQualifier::None ||
+        !evidence.type.reference.arguments.empty() ||
+        evidence.type.reference.name.components.size() != 1) {
+      continue;
+    }
+
+    const std::string &contextName =
+        evidence.type.reference.name.components.front();
+    bool isContextParameter = false;
+    for (const ast::ContextParameter &parameter :
+         transition.genericParameters) {
+      if (parameter.name == contextName &&
+          isSimpleTypeNamed(parameter.constraint, "Context")) {
+        isContextParameter = true;
+        break;
+      }
+    }
+    if (!isContextParameter) {
+      continue;
+    }
+
+    for (const ast::AllowsClause &clause : transition.allowsClauses) {
+      if (!isSimpleTypeNamed(clause.context, contextName)) {
+        continue;
+      }
+      for (const ast::TypeReference &capability : clause.capabilities) {
+        if (isSimpleTypeNamed(capability, "gpu_await")) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+} // namespace
 
 void validateContexts(const ast::Module &module) {
   std::unordered_set<std::string> contextIdentifiers;
@@ -78,6 +140,8 @@ void validateResources(const ast::Module &module) {
 
     std::unordered_set<std::string> stateNames;
     std::unordered_map<std::string, SourceLocation> stateLocations;
+    std::unordered_map<std::string, const ast::ResourceStateDeclaration *>
+        statesByName;
     for (const ast::ResourceStateDeclaration &state : resource.states) {
       if (!stateNames.insert(state.name).second) {
         throw DiagnosticError({"sema.duplicate_resource_state",
@@ -86,6 +150,7 @@ void validateResources(const ast::Module &module) {
                                state.location});
       }
       stateLocations.emplace(state.name, state.location);
+      statesByName.emplace(state.name, &state);
 
       std::unordered_set<std::string> fieldNames;
       for (const ast::ResourceField &field : state.fields) {
@@ -139,6 +204,8 @@ void validateResources(const ast::Module &module) {
       }
     }
 
+    std::unordered_map<std::string, std::vector<std::string>>
+        transitionsByState;
     for (const ast::ResourceTransitionDeclaration &transition :
          resource.transitions) {
       std::unordered_set<std::string> genericParameterNames;
@@ -201,8 +268,65 @@ void validateResources(const ast::Module &module) {
                  targetState + "`",
              transition.resultState.location});
       }
+
+      transitionsByState[sourceState].push_back(targetState);
+
+      if (transition.isAwait) {
+        const ast::ResourceStateDeclaration &source =
+            *statesByName.at(sourceState);
+        if (!hasOwnedEventEvidence(source)) {
+          throw DiagnosticError(
+              {"sema.await_missing_event_evidence",
+               "await transition `" + transition.name + "` in `" +
+                   resourceName + "` requires its source state `" +
+                   sourceState + "` to contain an `own event<...>` field",
+               transition.location});
+        }
+        if (!hasAwaitCapabilityEvidence(transition)) {
+          throw DiagnosticError(
+              {"sema.await_missing_capability_evidence",
+               "await transition `" + transition.name + "` in `" +
+                   resourceName +
+                   "` requires `@cx: C` evidence for a `C: Context` "
+                   "parameter and `where C allows {gpu_await}`",
+               transition.location});
+        }
+      }
+    }
+
+    if (!resource.states.empty()) {
+      std::unordered_set<std::string> reachableStates;
+      std::vector<std::string> worklist = {resource.states.front().name};
+      reachableStates.insert(resource.states.front().name);
+
+      for (std::size_t index = 0; index < worklist.size(); ++index) {
+        const auto outgoing = transitionsByState.find(worklist[index]);
+        if (outgoing == transitionsByState.end()) {
+          continue;
+        }
+        for (const std::string &target : outgoing->second) {
+          if (reachableStates.insert(target).second) {
+            worklist.push_back(target);
+          }
+        }
+      }
+
+      for (const ast::ResourceStateDeclaration &state : resource.states) {
+        if (reachableStates.find(state.name) == reachableStates.end()) {
+          throw DiagnosticError(
+              {"sema.unreachable_resource_state",
+               "state `" + state.name + "` in resource `" + resourceName +
+                   "` is unreachable from entry state `" +
+                   resource.states.front().name + "`",
+               state.location});
+        }
+      }
     }
   }
+}
+
+void validateKernels(const ast::Module &module) {
+  static_cast<void>(validateCallables(module));
 }
 
 } // namespace metreon::sema

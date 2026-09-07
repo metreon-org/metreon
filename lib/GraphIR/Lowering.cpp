@@ -2,10 +2,12 @@
 
 #include "metreon/Basic/Diagnostic.h"
 #include "metreon/Sema/ContextValidator.h"
+#include "metreon/Sema/CallableValidator.h"
 
 #include <cstddef>
 #include <map>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -21,6 +23,20 @@ using ContextTypeMap =
     std::unordered_map<std::string, std::vector<ContextMetadataRef>>;
 using ResourceStateMap =
     std::unordered_map<std::string, ResourceNodeId>;
+
+const char *literalKindName(ast::LiteralKind kind) {
+  switch (kind) {
+  case ast::LiteralKind::Integer:
+    return "integer";
+  case ast::LiteralKind::Floating:
+    return "floating";
+  case ast::LiteralKind::Boolean:
+    return "boolean";
+  case ast::LiteralKind::Infinity:
+    return "infinity";
+  }
+  return "unknown";
+}
 
 std::string joinTypeReferences(
     const std::vector<ast::TypeReference> &references) {
@@ -226,6 +242,151 @@ void lowerResources(const ast::Module &sourceModule, Module &module) {
   }
 }
 
+class CallableLowering {
+public:
+  CallableLowering(CallableGraph &graph, const sema::CallableAnalysis &analysis,
+                   const ContextMap &contexts)
+      : graph_(graph), analysis_(analysis), contexts_(contexts) {}
+
+  void lower(const ast::CallableDeclaration &callable, bool isKernel) {
+    const auto *context = analysis_.contexts.at(&callable);
+    const auto metadata = context ? contexts_.at(context->identifier) : ContextMetadataRef{};
+    graph_.setSignature({{"return_type", callable.resultType.str()},
+                         {"effects", joinTypeReferences(callable.effects)},
+                         {"where", joinAllowsClauses(callable.allowsClauses)},
+                         {"execution_context", context ? context->identifier : "unspecified"},
+                         {"execution_domain", context ? context->name.components.front()
+                                                      : isKernel ? "Gpu" : "context_independent"}},
+                        metadata);
+    scopes_.emplace_back();
+    for (const auto &parameter : callable.parameters) {
+      auto id = graph_.addParameter(parameter.name, parameter.type.str(),
+                                    parameter.isContextEvidence ? metadata : ContextMetadataRef{},
+                                    parameter.location);
+      if (id) {
+        scopes_.back().emplace(parameter.name, *id);
+      }
+    }
+    graph_.setBody(lowerBlock(callable.body, false));
+  }
+
+private:
+  std::optional<CallableValueId> lowerExpression(
+      const ast::Expression &expression, std::vector<CallableOperation> &body) {
+    const auto &info = analysis_.expressions.at(&expression);
+    if (expression.kind == ast::ExpressionKind::ContextReference) {
+      return std::nullopt;
+    }
+    if (expression.kind == ast::ExpressionKind::Reference) {
+      for (auto scope = scopes_.rbegin(); scope != scopes_.rend(); ++scope) {
+        const auto found = scope->find(expression.name.str());
+        if (found != scope->end()) {
+          return found->second;
+        }
+      }
+      throw std::logic_error("validated local is missing during lowering");
+    }
+    std::vector<CallableValueId> operands;
+    for (const auto &argument : expression.arguments) {
+      const auto id = lowerExpression(argument, body);
+      if (id) {
+        operands.push_back(*id);
+      }
+    }
+    const bool isCall = expression.kind == ast::ExpressionKind::Call;
+    auto operation = graph_.makeOperation(isCall ? CallableOperationKind::Call
+                                                 : CallableOperationKind::Literal,
+                                          isCall ? expression.name.str() : "",
+                                          expression.location);
+    operation.attributes.emplace("type", info.type.str());
+    operation.operands = std::move(operands);
+    if (isCall) {
+      operation.attributes.emplace("callee_kind", info.calleeKind);
+      operation.attributes.emplace("effects", joinTypeReferences(info.effects));
+      operation.attributes.emplace("await", info.isAwait ? "true" : "false");
+      if (info.context) {
+        operation.context = contexts_.at(info.context->identifier);
+      }
+    } else {
+      operation.attributes.emplace("kind", literalKindName(expression.literal.kind));
+      operation.attributes.emplace("value", expression.literal.value);
+    }
+    const auto id = operation.id;
+    body.push_back(std::move(operation));
+    return info.type.reference.name.str() == "void" ? std::nullopt
+                                                   : std::optional<CallableValueId>{id};
+  }
+
+  std::vector<CallableOperation> lowerBlock(const ast::Statement &block, bool nested) {
+    if (nested) {
+      scopes_.emplace_back();
+    }
+    std::vector<CallableOperation> body;
+    for (const auto &statement : block.statements) {
+      if (statement.kind == ast::StatementKind::Call) {
+        lowerExpression(*statement.expression, body);
+        continue;
+      }
+      if (statement.kind == ast::StatementKind::Block) {
+        auto operation = graph_.makeOperation(CallableOperationKind::Block, "", statement.location);
+        operation.body = lowerBlock(statement, true);
+        body.push_back(std::move(operation));
+        continue;
+      }
+      if (statement.kind == ast::StatementKind::Return) {
+        std::vector<CallableValueId> operands;
+        if (statement.expression) {
+          operands.push_back(lowerExpression(*statement.expression, body).value());
+        }
+        auto operation = graph_.makeOperation(CallableOperationKind::Return, "", statement.location);
+        operation.operands = std::move(operands);
+        body.push_back(std::move(operation));
+        continue;
+      }
+      const auto &variable = statement.variable;
+      std::vector<CallableValueId> operands;
+      if (variable.initializer && variable.initializer->kind != ast::ExpressionKind::Literal) {
+        operands.push_back(lowerExpression(*variable.initializer, body).value());
+      }
+      auto operation = graph_.makeOperation(CallableOperationKind::Variable,
+                                            variable.name, variable.location);
+      operation.attributes = {
+          {"initialized", variable.initializer ? "true" : "false"},
+          {"mutability", variable.isConstant ? "const" : "mutable"},
+          {"storage", "automatic"}, {"type", variable.type.str()}};
+      operation.operands = std::move(operands);
+      if (variable.initializer && variable.initializer->kind == ast::ExpressionKind::Literal) {
+        operation.attributes.emplace("initializer.kind", literalKindName(variable.initializer->literal.kind));
+        operation.attributes.emplace("initializer.value", variable.initializer->literal.value);
+      }
+      scopes_.back().emplace(variable.name, operation.id);
+      body.push_back(std::move(operation));
+    }
+    if (nested) {
+      scopes_.pop_back();
+    }
+    return body;
+  }
+
+  CallableGraph &graph_;
+  const sema::CallableAnalysis &analysis_;
+  const ContextMap &contexts_;
+  std::vector<std::unordered_map<std::string, CallableValueId>> scopes_;
+};
+
+void lowerCallables(const ast::Module &sourceModule, Module &module,
+                    const sema::CallableAnalysis &analysis,
+                    const ContextMap &contexts) {
+  for (const auto &kernel : sourceModule.kernels) {
+    auto &graph = module.addKernelGraph(kernel.name.str(), kernel.location);
+    CallableLowering(graph, analysis, contexts).lower(kernel, true);
+  }
+  for (const auto &procedure : sourceModule.procedures) {
+    auto &graph = module.addProcedureGraph(procedure.name.str(), procedure.location);
+    CallableLowering(graph, analysis, contexts).lower(procedure, false);
+  }
+}
+
 bool contextHasGrant(const Module &module,
                      const ContextMetadataRef &context,
                      const std::string &requiredCapability) {
@@ -347,6 +508,7 @@ void lowerResourceContextTemplates(const ast::Module &sourceModule,
 Module lowerModule(const ast::Module &sourceModule, std::string sourceName) {
   sema::validateContexts(sourceModule);
   sema::validateResources(sourceModule);
+  const auto callableAnalysis = sema::validateCallables(sourceModule);
 
   Module graph(std::move(sourceName));
   ContextMap contextsByIdentifier;
@@ -406,6 +568,7 @@ Module lowerModule(const ast::Module &sourceModule, std::string sourceName) {
     }
   }
 
+  lowerCallables(sourceModule, graph, callableAnalysis, contextsByIdentifier);
   lowerResources(sourceModule, graph);
   lowerResourceContextTemplates(sourceModule, graph, contextsByIdentifier);
 

@@ -9,42 +9,14 @@ cmake --build build --parallel
 ./build/metreonc --emit=graphir examples/contexts.mtr
 ./build/metreonc --emit=graphir examples/resources.mtr
 ./build/metreonc --emit=graphir examples/accumulators.mtr
+./build/metreonc --emit=graphir examples/kernel_variables.mtr
+./build/metreonc --emit=graphir examples/procedures.mtr
 ```
 
 The current compiler parses and validates `.mtr` context declarations and
-resource state machines, then emits textual GraphIR with separate context and
-resource graphs. It does not yet generate or execute runtime or GPU code.
-
-Resource GraphIR ends with a template section that maps each transition context
-parameter to every locally declared context. Each mapping records a non-fatal
-`valid` or `invalid` result by matching the exact `where ... allows {...}`
-capabilities, including generic arguments, against that context's grant nodes.
-Promotion of invalid results to compilation errors is intentionally deferred to
-a later IR optimization pass.
-
-Every context declaration ends with a module-unique identifier after its grant
-block, for example `} thread1;`. Multiple declarations may share the same
-context type, such as `Gpu::Thread`, while their identifiers, grants, `#ctxN`
-metadata, and resource-template validation remain distinct.
-
-Context angle brackets accept either generic parameter declarations, such as
-`Transport::TxQueue<N: Nic, Q: Queue>`, or concrete type arguments, such as
-`Gpu::PersistentWorker<D, Uniform<Block>>`. Nested arguments including
-`Uniform<Block>` and `Uniform<Cluster>` are preserved in context metadata.
-Parameter declarations and concrete arguments cannot be mixed in one list.
-
-Resource states may opt into persistent accumulator storage after their state
-declaration with `accumulator State(scope);`. Supported scopes are `thread`,
-`warp`, `block`, `device`, `cluster`, and `host::pinned`. GraphIR records the
-selected scope in the corresponding `graphir.resource_state` metadata.
-
-## Context evidence
-
-GraphIR represents a context as immutable compiler metadata, not as a graph node
-or runtime value. Every context-owned node references metadata containing a
-compiler-minted opaque key. The key is nominally unique to its module and has no
-source-level constructor or runtime representation; GraphIR rejects attempts to
-store, transmute, cast, send, or capture it. This is a compiler provenance and
-type-system invariant, not a secret embedded in generated code. The printed key
-is only a reproducible, module-local diagnostic symbol; it is not accepted as a
-user-provided bearer token.
+resource state machines, kernels, and procedures, then emits textual GraphIR
+with context metadata, resource graphs, and ordered callable bodies. Procedures
+support typed parameters and return types, resource-transition calls, nested
+blocks, and execution-context/effect requirements. See
+[procedure syntax and validation](docs/procedures.md) for the supported forms
+and limits. It does not yet generate or execute runtime or GPU code.

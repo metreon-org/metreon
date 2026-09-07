@@ -3,6 +3,7 @@
 #include "metreon/Basic/SourceLocation.h"
 
 #include <sstream>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -105,6 +106,47 @@ struct ValueType {
   }
 };
 
+enum class LiteralKind {
+  Integer,
+  Floating,
+  Boolean,
+  Infinity,
+};
+
+struct LiteralInitializer {
+  LiteralKind kind = LiteralKind::Integer;
+  std::string value;
+  SourceLocation location;
+};
+
+enum class ExpressionKind { Literal, Reference, ContextReference, Call };
+
+struct Expression {
+  ExpressionKind kind = ExpressionKind::Literal;
+  LiteralInitializer literal;
+  QualifiedName name;
+  std::vector<Expression> arguments;
+  SourceLocation location;
+};
+
+struct VariableDeclaration {
+  ValueType type;
+  std::string name;
+  bool isConstant = false;
+  std::optional<Expression> initializer;
+  SourceLocation location;
+};
+
+enum class StatementKind { Variable, Call, Block, Return };
+
+struct Statement {
+  StatementKind kind = StatementKind::Block;
+  VariableDeclaration variable;
+  std::optional<Expression> expression;
+  std::vector<Statement> statements;
+  SourceLocation location;
+};
+
 struct ResourceField {
   std::string name;
   ValueType type;
@@ -155,6 +197,21 @@ struct AllowsClause {
   }
 };
 
+// Kernels and procedures share a body grammar. Module membership preserves the
+// declaration kind; only procedures have an explicit result type in source.
+struct CallableDeclaration {
+  QualifiedName name;
+  std::vector<TransitionParameter> parameters;
+  ValueType resultType;
+  std::vector<TypeReference> effects;
+  std::vector<AllowsClause> allowsClauses;
+  Statement body;
+  SourceLocation location;
+};
+
+using KernelDeclaration = CallableDeclaration;
+using ProcedureDeclaration = CallableDeclaration;
+
 struct ResourceTransitionDeclaration {
   std::string name;
   std::vector<ContextParameter> genericParameters;
@@ -178,6 +235,8 @@ struct ResourceDeclaration {
 struct Module {
   std::vector<ContextDeclaration> contexts;
   std::vector<ResourceDeclaration> resources;
+  std::vector<KernelDeclaration> kernels;
+  std::vector<ProcedureDeclaration> procedures;
 };
 
 } // namespace metreon::ast

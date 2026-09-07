@@ -23,6 +23,7 @@ add_library(metreon_frontend
     lib/Lexer/Lexer.cpp
     lib/Parser/Parser.cpp
     lib/Sema/ContextValidator.cpp
+    lib/Sema/CallableValidator.cpp
 )
 
 target_include_directories(metreon_frontend
@@ -39,6 +40,20 @@ metreon_enable_warnings(metreonc)
 include(CTest)
 
 if(BUILD_TESTING)
+    add_executable(metreon_callable_tests tests/CallableTests.cpp)
+    target_link_libraries(metreon_callable_tests PRIVATE metreon_frontend)
+    metreon_enable_warnings(metreon_callable_tests)
+    add_test(NAME metreon.frontend.callables
+        COMMAND metreon_callable_tests ${CMAKE_CURRENT_SOURCE_DIR}/examples/procedures.mtr)
+    add_test(
+        NAME metreon.frontend.procedure.cli
+        COMMAND metreonc --emit=graphir ${CMAKE_CURRENT_SOURCE_DIR}/examples/procedures.mtr
+    )
+    set_tests_properties(
+        metreon.frontend.procedure.cli
+        PROPERTIES PASS_REGULAR_EXPRESSION "graphir.call.*CopySlot::complete.*callee_kind.*transition"
+    )
+
     add_executable(metreon_frontend_tests tests/FrontendTests.cpp)
     target_link_libraries(metreon_frontend_tests PRIVATE metreon_frontend)
 
@@ -57,6 +72,10 @@ if(BUILD_TESTING)
         NAME metreon.frontend.accumulator.cli
         COMMAND metreonc --emit=graphir ${CMAKE_CURRENT_SOURCE_DIR}/examples/accumulators.mtr
     )
+    add_test(
+        NAME metreon.frontend.kernel.cli
+        COMMAND metreonc --emit=graphir ${CMAKE_CURRENT_SOURCE_DIR}/examples/kernel_variables.mtr
+    )
     set_tests_properties(
         metreon.frontend.cli
         PROPERTIES PASS_REGULAR_EXPRESSION "graphir.context_metadata.*context_key"
@@ -68,5 +87,9 @@ if(BUILD_TESTING)
     set_tests_properties(
         metreon.frontend.accumulator.cli
         PROPERTIES PASS_REGULAR_EXPRESSION "graphir.resource_state.*accumulator.*device"
+    )
+    set_tests_properties(
+        metreon.frontend.kernel.cli
+        PROPERTIES PASS_REGULAR_EXPRESSION "graphir.variable_decl.*initializer.kind.*infinity"
     )
 endif()
