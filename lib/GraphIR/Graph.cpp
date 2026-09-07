@@ -1,6 +1,7 @@
 #include "metreon/GraphIR/Graph.h"
 
 #include <atomic>
+#include <functional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -137,7 +138,8 @@ Module::Module(Module &&other) noexcept
       resourceGraphs_(std::move(other.resourceGraphs_)),
       resourceContextTemplates_(
           std::move(other.resourceContextTemplates_)),
-      kernelGraphs_(std::move(other.kernelGraphs_)) {
+      kernelGraphs_(std::move(other.kernelGraphs_)),
+      procedureGraphs_(std::move(other.procedureGraphs_)) {
   // Keep a moved-from module valid without letting it mint duplicate keys.
   other.sourceName_.clear();
   other.contexts_.clear();
@@ -146,6 +148,7 @@ Module::Module(Module &&other) noexcept
   other.resourceGraphs_.clear();
   other.resourceContextTemplates_.clear();
   other.kernelGraphs_.clear();
+  other.procedureGraphs_.clear();
   other.moduleIdentity_ = mintModuleIdentity();
 }
 
@@ -162,6 +165,7 @@ Module &Module::operator=(Module &&other) noexcept {
   resourceGraphs_ = std::move(other.resourceGraphs_);
   resourceContextTemplates_ = std::move(other.resourceContextTemplates_);
   kernelGraphs_ = std::move(other.kernelGraphs_);
+  procedureGraphs_ = std::move(other.procedureGraphs_);
   other.sourceName_.clear();
   other.contexts_.clear();
   other.nodes_.clear();
@@ -169,6 +173,7 @@ Module &Module::operator=(Module &&other) noexcept {
   other.resourceGraphs_.clear();
   other.resourceContextTemplates_.clear();
   other.kernelGraphs_.clear();
+  other.procedureGraphs_.clear();
   other.moduleIdentity_ = mintModuleIdentity();
   return *this;
 }
@@ -182,13 +187,27 @@ ResourceNodeId ResourceGraph::addState(
   return id;
 }
 
-KernelVariableId KernelGraph::addVariable(
-    std::string name, std::map<std::string, std::string> attributes,
+std::optional<CallableValueId> CallableGraph::addParameter(
+    std::string name, std::string type, ContextMetadataRef context,
     SourceLocation location) {
-  const KernelVariableId id = variables_.size();
-  variables_.push_back(KernelVariableNode{
-      id, std::move(name), std::move(attributes), location});
+  std::optional<CallableValueId> id;
+  if (!context) {
+    id = nextValue_++;
+  }
+  parameters_.push_back({id, std::move(name), std::move(type),
+                         std::move(context), location});
   return id;
+}
+
+CallableOperation CallableGraph::makeOperation(CallableOperationKind kind,
+                                                std::string name,
+                                                SourceLocation location) {
+  CallableOperation operation;
+  operation.id = nextValue_++;
+  operation.kind = kind;
+  operation.name = std::move(name);
+  operation.location = location;
+  return operation;
 }
 
 void ResourceGraph::addTransition(
@@ -298,6 +317,12 @@ KernelGraph &Module::addKernelGraph(std::string name,
   return kernelGraphs_.back();
 }
 
+ProcedureGraph &Module::addProcedureGraph(std::string name,
+                                           SourceLocation location) {
+  procedureGraphs_.emplace_back(std::move(name), location);
+  return procedureGraphs_.back();
+}
+
 std::string Module::print() const {
   std::ostringstream output;
   output << "graphir.module {\n";
@@ -373,27 +398,92 @@ std::string Module::print() const {
 
   output << "  }\n";
 
-  for (std::size_t kernelIndex = 0; kernelIndex < kernelGraphs_.size();
-       ++kernelIndex) {
-    const KernelGraph &kernel = kernelGraphs_[kernelIndex];
-    output << '\n';
-    output << "  graphir.kernel @\"" << escapeString(kernel.name()) << "\"";
-    output << " loc(\"" << escapeString(sourceName_) << "\":"
-           << kernel.location().line << ':' << kernel.location().column
-           << ") {\n";
-
-    for (const KernelVariableNode &variable : kernel.variables()) {
-      output << "    %k" << kernelIndex << "v" << variable.id
-             << " = graphir.variable_decl \""
-             << escapeString(variable.name) << '\"';
-      printAttributes(output, variable.attributes);
-      output << " loc(\"" << escapeString(sourceName_) << "\":"
-             << variable.location.line << ':' << variable.location.column
-             << ")\n";
+  auto printContext = [&](const ContextMetadataRef &context) {
+    if (context) {
+      requireContextUse(context, ContextUse::MetadataAttachment);
+      output << " context(#ctx" << context->key_.ordinal_ << ')';
     }
-
-    output << "  }\n";
-  }
+  };
+  auto printLocation = [&](SourceLocation location) {
+    output << " loc(\"" << escapeString(sourceName_) << "\":"
+           << location.line << ':' << location.column << ')';
+  };
+  auto printCallables = [&](const std::vector<CallableGraph> &callables,
+                            const std::string &kind, const std::string &prefix) {
+    for (std::size_t index = 0; index < callables.size(); ++index) {
+      const auto &callable = callables[index];
+      const std::string valuePrefix = "%" + prefix + std::to_string(index) + "v";
+      output << "\n  graphir." << kind << " @\"" << escapeString(callable.name()) << '\"';
+      printAttributes(output, callable.attributes());
+      printContext(callable.context());
+      printLocation(callable.location());
+      output << " {\n";
+      for (const auto &parameter : callable.parameters()) {
+        output << "    ";
+        if (parameter.id) {
+          output << valuePrefix << *parameter.id << " = graphir.parameter ";
+        } else {
+          output << "graphir.context_parameter ";
+        }
+        output << '\"' << escapeString(parameter.name) << '\"';
+        printAttributes(output, {{"type", parameter.type}});
+        printContext(parameter.context);
+        printLocation(parameter.location);
+        output << '\n';
+      }
+      std::function<void(const std::vector<CallableOperation> &, std::size_t)> printBody;
+      printBody = [&](const auto &body, std::size_t indent) {
+        for (const auto &operation : body) {
+          output << std::string(indent, ' ');
+          const bool isBlock = operation.kind == CallableOperationKind::Block;
+          const bool isReturn = operation.kind == CallableOperationKind::Return;
+          const auto type = operation.attributes.find("type");
+          const bool isVoid = type != operation.attributes.end() && type->second == "void";
+          if (!isBlock && !isReturn && !isVoid) {
+            output << valuePrefix << operation.id << " = ";
+          }
+          const char *operationName = "";
+          switch (operation.kind) {
+          case CallableOperationKind::Literal: operationName = "literal"; break;
+          case CallableOperationKind::Variable: operationName = "variable_decl"; break;
+          case CallableOperationKind::Call: operationName = "call"; break;
+          case CallableOperationKind::Block: operationName = "block"; break;
+          case CallableOperationKind::Return: operationName = "return"; break;
+          }
+          output << "graphir." << operationName;
+          if (!operation.name.empty()) {
+            output << " \"" << escapeString(operation.name) << '\"';
+          }
+          if (!operation.operands.empty()) {
+            output << " operands(";
+            for (std::size_t operand = 0; operand < operation.operands.size(); ++operand) {
+              if (operand != 0) {
+                output << ", ";
+              }
+              output << valuePrefix << operation.operands[operand];
+            }
+            output << ')';
+          }
+          if (!operation.attributes.empty()) {
+            printAttributes(output, operation.attributes);
+          }
+          printContext(operation.context);
+          printLocation(operation.location);
+          if (isBlock) {
+            output << " {\n";
+            printBody(operation.body, indent + 2);
+            output << std::string(indent, ' ') << "}\n";
+          } else {
+            output << '\n';
+          }
+        }
+      };
+      printBody(callable.body(), 4);
+      output << "  }\n";
+    }
+  };
+  printCallables(kernelGraphs_, "kernel", "k");
+  printCallables(procedureGraphs_, "procedure", "p");
 
   for (const ResourceGraph &resource : resourceGraphs_) {
     output << '\n';

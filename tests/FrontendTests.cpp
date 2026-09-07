@@ -21,7 +21,7 @@ using metreon::graphir::ContextUse;
 using metreon::graphir::Edge;
 using metreon::graphir::EdgeKind;
 using metreon::graphir::KernelGraph;
-using metreon::graphir::KernelVariableNode;
+using metreon::graphir::CallableOperation;
 using metreon::graphir::Module;
 using metreon::graphir::Node;
 using metreon::graphir::NodeId;
@@ -404,33 +404,33 @@ void parsesAndLowersKernelVariables() {
         "expected one kernel declaration");
   const metreon::ast::KernelDeclaration &kernel = module.kernels.front();
   check(kernel.name.str() == "literal_initializers" &&
-            kernel.variables.size() == 6,
+            kernel.body.statements.size() == 6,
         "kernel name or local declarations were lost");
 
-  const auto &featureDim = kernel.variables[0];
-  const auto &runningMax = kernel.variables[1];
-  const auto &runningSum = kernel.variables[2];
-  const auto &enabled = kernel.variables[3];
-  const auto &iteration = kernel.variables[4];
-  const auto &scratch = kernel.variables[5];
+  const auto &featureDim = kernel.body.statements[0].variable;
+  const auto &runningMax = kernel.body.statements[1].variable;
+  const auto &runningSum = kernel.body.statements[2].variable;
+  const auto &enabled = kernel.body.statements[3].variable;
+  const auto &iteration = kernel.body.statements[4].variable;
+  const auto &scratch = kernel.body.statements[5].variable;
   check(featureDim.isConstant && featureDim.type.str() == "index" &&
             featureDim.initializer &&
-            featureDim.initializer->kind == metreon::ast::LiteralKind::Integer &&
-            featureDim.initializer->value == "64",
+            featureDim.initializer->literal.kind == metreon::ast::LiteralKind::Integer &&
+            featureDim.initializer->literal.value == "64",
         "const integer declaration was not represented correctly");
   check(runningMax.initializer &&
-            runningMax.initializer->kind == metreon::ast::LiteralKind::Infinity &&
-            runningMax.initializer->value == "-infinity",
+            runningMax.initializer->literal.kind == metreon::ast::LiteralKind::Infinity &&
+            runningMax.initializer->literal.value == "-infinity",
         "signed infinity initializer was not represented correctly");
   check(runningSum.initializer &&
-            runningSum.initializer->kind == metreon::ast::LiteralKind::Floating &&
-            runningSum.initializer->value == "0.0",
+            runningSum.initializer->literal.kind == metreon::ast::LiteralKind::Floating &&
+            runningSum.initializer->literal.value == "0.0",
         "floating initializer was not represented correctly");
   check(enabled.initializer &&
-            enabled.initializer->kind == metreon::ast::LiteralKind::Boolean &&
-            enabled.initializer->value == "true",
+            enabled.initializer->literal.kind == metreon::ast::LiteralKind::Boolean &&
+            enabled.initializer->literal.value == "true",
         "boolean initializer was not represented correctly");
-  check(iteration.initializer && iteration.initializer->value == "-1",
+  check(iteration.initializer && iteration.initializer->literal.value == "-1",
         "signed integer initializer was not represented correctly");
   check(!scratch.isConstant && !scratch.initializer,
         "uninitialized mutable declaration was not preserved");
@@ -441,9 +441,9 @@ void parsesAndLowersKernelVariables() {
         "kernel GraphIR section was not emitted");
   const KernelGraph &kernelGraph = graph.kernelGraphs().front();
   check(kernelGraph.name() == "literal_initializers" &&
-            kernelGraph.variables().size() == 6,
+            kernelGraph.body().size() == 6,
         "kernel GraphIR lost its declaration or local variables");
-  const KernelVariableNode &maxNode = kernelGraph.variables()[1];
+  const CallableOperation &maxNode = kernelGraph.body()[1];
   check(maxNode.name == "running_max" &&
             maxNode.attributes.at("type") == "f32" &&
             maxNode.attributes.at("mutability") == "mutable" &&
@@ -568,6 +568,12 @@ resource ScopeResource<S: AddressSpace> {
   accumulator DeviceState(device);
   accumulator ClusterState(cluster);
   accumulator HostPinnedState(host::pinned);
+
+  transition to_warp(self: own ThreadState) -> WarpState;
+  transition to_block(self: own WarpState) -> BlockState;
+  transition to_device(self: own BlockState) -> DeviceState;
+  transition to_cluster(self: own DeviceState) -> ClusterState;
+  transition to_host(self: own ClusterState) -> HostPinnedState;
 }
 )";
   const Module graph = metreon::graphir::lowerModule(
@@ -689,7 +695,7 @@ context Gpu::WrongGeneric grants {
 context Host::None grants {} none;
 
 resource Slot {
-  state Ready();
+  state Ready(ticket: own event<Copy>);
 
   transition use<C: Context>(
     @cx: C;
@@ -1159,6 +1165,86 @@ void resolvesRepeatedContextTypesByIdentifier() {
         "context identifier did not select the intended same-type target");
 }
 
+void enforcesResourceStateReachability() {
+  expectDiagnostic("sema.unreachable_resource_state", [] {
+    const auto module = parse(R"(
+resource Slot {
+  state Entry();
+  state Reachable();
+  state Dead();
+  transition advance(self: own Entry) -> Reachable;
+}
+)");
+    static_cast<void>(
+        metreon::graphir::lowerModule(module, "unreachable-state.mtr"));
+  });
+}
+
+void enforcesAwaitEvidence() {
+  const auto valid = parse(R"(
+context Gpu::Await grants { gpu_await } await_ctx;
+resource Slot {
+  state Pending(ticket: own event<Copy>);
+  state Ready();
+  await transition complete<C: Context>(
+    @cx: C;
+    self: own Pending
+  ) -> Ready
+  where C allows {gpu_await};
+}
+)");
+  static_cast<void>(
+      metreon::graphir::lowerModule(valid, "valid-await-evidence.mtr"));
+
+  expectDiagnostic("sema.await_missing_event_evidence", [] {
+    const auto module = parse(R"(
+resource Slot {
+  state Pending(ticket: event<Copy>);
+  state Ready();
+  await transition complete<C: Context>(
+    @cx: C;
+    self: own Pending
+  ) -> Ready
+  where C allows {gpu_await};
+}
+)");
+    static_cast<void>(
+        metreon::graphir::lowerModule(module, "missing-event-evidence.mtr"));
+  });
+
+  expectDiagnostic("sema.await_missing_capability_evidence", [] {
+    const auto module = parse(R"(
+resource Slot {
+  state Pending(ticket: own event<Copy>);
+  state Ready();
+  await transition complete<C: Context>(
+    @cx: C;
+    self: own Pending
+  ) -> Ready
+  where C allows {gpu_store};
+}
+)");
+    static_cast<void>(metreon::graphir::lowerModule(
+        module, "missing-capability-evidence.mtr"));
+  });
+
+  expectDiagnostic("sema.await_missing_capability_evidence", [] {
+    const auto module = parse(R"(
+resource Slot {
+  state Pending(ticket: own event<Copy>);
+  state Ready();
+  await transition complete<C: Context>(
+    @cx: Wrong;
+    self: own Pending
+  ) -> Ready
+  where C allows {gpu_await};
+}
+)");
+    static_cast<void>(metreon::graphir::lowerModule(
+        module, "mismatched-capability-evidence.mtr"));
+  });
+}
+
 void diagnosesInvalidInput() {
   expectDiagnostic("parse.expected_context_identifier", [] {
     static_cast<void>(parse("context Host::Process grants {};"));
@@ -1214,8 +1300,9 @@ void diagnosesInvalidInput() {
         metreon::graphir::lowerModule(module, "uninitialized-const.mtr"));
   });
 
-  expectDiagnostic("parse.expected_literal_initializer", [] {
-    static_cast<void>(parse("kernel work() { f32 value = other; }"));
+  expectDiagnostic("sema.unknown_variable", [] {
+    static_cast<void>(metreon::graphir::lowerModule(
+        parse("kernel work() { f32 value = other; }"), "unknown-variable.mtr"));
   });
 
   expectDiagnostic("parse.invalid_signed_literal", [] {
@@ -1313,6 +1400,9 @@ int main() {
       {"preserves external transition targets", preservesExternalTransitionTargets},
       {"resolves repeated context types by identifier",
        resolvesRepeatedContextTypesByIdentifier},
+      {"enforces resource state reachability",
+       enforcesResourceStateReachability},
+      {"enforces await evidence", enforcesAwaitEvidence},
       {"diagnoses invalid input", diagnosesInvalidInput},
   };
 

@@ -16,6 +16,8 @@ enum class TokenKind {
   KeywordGrants,
   KeywordResource,
   KeywordKernel,
+  KeywordProcedure,
+  KeywordReturn,
   KeywordConst,
   KeywordState,
   KeywordAccumulator,

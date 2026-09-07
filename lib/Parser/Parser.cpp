@@ -20,58 +20,152 @@ ast::Module Parser::parseModule() {
       continue;
     }
     if (current_.kind == lexer::TokenKind::KeywordKernel) {
-      module.kernels.push_back(parseKernelDeclaration());
+      module.kernels.push_back(parseCallableDeclaration(true));
+      continue;
+    }
+    if (current_.kind == lexer::TokenKind::KeywordProcedure) {
+      module.procedures.push_back(parseCallableDeclaration(false));
       continue;
     }
     fail("parse.expected_declaration",
-         "expected a context, resource, or kernel declaration, found " +
+         "expected a context, resource, kernel, or procedure declaration, found " +
              std::string(lexer::tokenKindName(current_.kind)));
   }
   return module;
 }
 
-ast::KernelDeclaration Parser::parseKernelDeclaration() {
-  const lexer::Token kernelToken =
-      expect(lexer::TokenKind::KeywordKernel, "`kernel`");
-  ast::KernelDeclaration declaration;
-  declaration.location = kernelToken.location;
+ast::CallableDeclaration Parser::parseCallableDeclaration(bool isKernel) {
+  ast::CallableDeclaration declaration;
+  declaration.location = current_.location;
+  advance();
   declaration.name = parseQualifiedName();
-
-  expect(lexer::TokenKind::LeftParen, "`(` after the kernel name");
-  expect(lexer::TokenKind::RightParen,
-         "`)` after the empty kernel parameter list");
-  expect(lexer::TokenKind::LeftBrace, "`{` before the kernel body");
-
-  while (current_.kind != lexer::TokenKind::RightBrace) {
-    if (current_.kind == lexer::TokenKind::EndOfFile) {
-      fail("parse.unterminated_kernel",
-           "expected `}` before the end of the kernel declaration");
-    }
-    declaration.variables.push_back(parseVariableDeclaration());
+  expect(lexer::TokenKind::LeftParen, "`(` after the callable name");
+  declaration.parameters = parseTransitionParameters();
+  expect(lexer::TokenKind::RightParen, "`)` after parameters");
+  if (isKernel) {
+    declaration.resultType.reference.name.components = {"void"};
+    declaration.resultType.location = declaration.location;
+  } else {
+    expect(lexer::TokenKind::Arrow, "`->` before the procedure return type");
+    declaration.resultType = parseValueType();
   }
-
-  expect(lexer::TokenKind::RightBrace, "`}` after the kernel body");
+  if (consume(lexer::TokenKind::Bang)) {
+    declaration.effects = parseEffectSet();
+  }
+  declaration.allowsClauses = parseAllowsClauses();
+  declaration.body = parseBlock();
   consume(lexer::TokenKind::Semicolon);
   return declaration;
 }
 
-ast::VariableDeclaration Parser::parseVariableDeclaration() {
-  ast::VariableDeclaration declaration;
-  declaration.location = current_.location;
-  declaration.isConstant = consume(lexer::TokenKind::KeywordConst);
-  declaration.type = parseValueType();
+ast::Statement Parser::parseBlock() {
+  ast::Statement block;
+  block.kind = ast::StatementKind::Block;
+  block.location = expect(lexer::TokenKind::LeftBrace, "`{` before a block").location;
+  while (current_.kind != lexer::TokenKind::RightBrace) {
+    if (current_.kind == lexer::TokenKind::EndOfFile) {
+      fail("parse.unterminated_block", "expected `}` before the end of a block");
+    }
+    block.statements.push_back(parseStatement());
+  }
+  advance();
+  return block;
+}
 
+ast::Statement Parser::parseStatement() {
+  if (current_.kind == lexer::TokenKind::LeftBrace) {
+    return parseBlock();
+  }
+  ast::Statement statement;
+  statement.location = current_.location;
+  if (consume(lexer::TokenKind::KeywordReturn)) {
+    statement.kind = ast::StatementKind::Return;
+    if (current_.kind != lexer::TokenKind::Semicolon) {
+      statement.expression = parseExpression();
+    }
+    expect(lexer::TokenKind::Semicolon, "`;` after return");
+    return statement;
+  }
+
+  const bool isConstant = consume(lexer::TokenKind::KeywordConst);
+  ast::ValueType type;
+  type.location = current_.location;
+  const bool isOwned = consume(lexer::TokenKind::KeywordOwn);
+  type.ownership = isOwned ? ast::OwnershipQualifier::Own
+                           : ast::OwnershipQualifier::None;
+  ast::QualifiedName name = parseQualifiedName();
+  if (!isConstant && !isOwned && current_.kind == lexer::TokenKind::LeftParen) {
+    statement.kind = ast::StatementKind::Call;
+    statement.expression = parseNamedExpression(std::move(name));
+    expect(lexer::TokenKind::Semicolon, "`;` after a call");
+  } else {
+    type.reference = parseTypeReference(std::move(name));
+    statement.kind = ast::StatementKind::Variable;
+    statement.variable = parseVariableDeclaration(std::move(type), isConstant);
+  }
+  return statement;
+}
+
+ast::VariableDeclaration Parser::parseVariableDeclaration(ast::ValueType type,
+                                                         bool isConstant) {
+  ast::VariableDeclaration declaration;
+  declaration.type = std::move(type);
+  declaration.isConstant = isConstant;
   const lexer::Token name =
       expect(lexer::TokenKind::Identifier, "a variable name after its type");
   declaration.name = name.text;
   declaration.location = name.location;
-
   if (consume(lexer::TokenKind::Equal)) {
-    declaration.initializer = parseLiteralInitializer();
+    declaration.initializer = parseExpression();
   }
-
   expect(lexer::TokenKind::Semicolon, "`;` after the variable declaration");
   return declaration;
+}
+
+ast::Expression Parser::parseExpression() {
+  ast::Expression expression;
+  expression.location = current_.location;
+  if (consume(lexer::TokenKind::At)) {
+    expression.kind = ast::ExpressionKind::ContextReference;
+    expression.name = parseQualifiedName();
+    return expression;
+  }
+  if (current_.kind == lexer::TokenKind::Identifier && current_.text != "infinity") {
+    return parseNamedExpression(parseQualifiedName());
+  }
+  expression.literal = parseLiteralInitializer();
+  return expression;
+}
+
+ast::Expression Parser::parseNamedExpression(ast::QualifiedName name) {
+  ast::Expression expression;
+  expression.location = name.location;
+  expression.name = std::move(name);
+  expression.kind = ast::ExpressionKind::Reference;
+  if (consume(lexer::TokenKind::LeftParen)) {
+    expression.kind = ast::ExpressionKind::Call;
+    while (current_.kind != lexer::TokenKind::RightParen) {
+      expression.arguments.push_back(parseExpression());
+      if (!consume(lexer::TokenKind::Comma) && !consume(lexer::TokenKind::Semicolon)) {
+        break;
+      }
+    }
+    expect(lexer::TokenKind::RightParen, "`)` after call arguments");
+  }
+  return expression;
+}
+
+std::vector<ast::AllowsClause> Parser::parseAllowsClauses() {
+  std::vector<ast::AllowsClause> clauses;
+  while (consume(lexer::TokenKind::KeywordWhere)) {
+    ast::AllowsClause clause;
+    clause.location = current_.location;
+    clause.context = parseTypeReference();
+    expect(lexer::TokenKind::KeywordAllows, "`allows` in a where clause");
+    clause.capabilities = parseEffectSet();
+    clauses.push_back(std::move(clause));
+  }
+  return clauses;
 }
 
 ast::LiteralInitializer Parser::parseLiteralInitializer() {
@@ -239,14 +333,7 @@ Parser::parseResourceTransitionDeclaration() {
     declaration.effects = parseEffectSet();
   }
 
-  while (consume(lexer::TokenKind::KeywordWhere)) {
-    ast::AllowsClause clause;
-    clause.location = current_.location;
-    clause.context = parseTypeReference();
-    expect(lexer::TokenKind::KeywordAllows, "`allows` in a where clause");
-    clause.capabilities = parseEffectSet();
-    declaration.allowsClauses.push_back(std::move(clause));
-  }
+  declaration.allowsClauses = parseAllowsClauses();
 
   expect(lexer::TokenKind::Semicolon, "`;` after the transition");
   return declaration;

@@ -1,0 +1,54 @@
+context Host::Process grants {gpu_async_copy, gpu_await} host_ctx;
+context Gpu::Thread grants {gpu_load} gpu_ctx;
+
+resource CopySlot<S: AddressSpace> {
+  state Vacant(storage: own buffer<S>);
+  state InFlight(storage: own buffer<S>, ticket: own event<Copy>);
+  state Ready(storage: own buffer<S>);
+
+  transition begin<C: Context>(
+      @cx: C; self: own Vacant, src: view<f32, gpu::global>
+  ) -> InFlight !{gpu_async_copy}
+    where C allows {gpu_async_copy};
+
+  await transition complete<C: Context>(
+      @cx: C; self: own InFlight
+  ) -> Ready !{gpu_await}
+    where C allows {gpu_await};
+}
+
+// Context evidence is forwarded as metadata; the owned slot is consumed.
+procedure finish(@cx: host_ctx; slot: own CopySlot::InFlight<gpu::global>)
+    -> own CopySlot::Ready<gpu::global> !{gpu_await}
+    where host_ctx allows {gpu_await} {
+  {
+    own CopySlot::Ready<gpu::global> ready = CopySlot::complete(@cx; slot);
+    return ready;
+  }
+}
+
+procedure orchestrate(@cx: host_ctx;
+                      slot: own CopySlot::Vacant<gpu::global>,
+                      src: view<f32, gpu::global>)
+    -> own CopySlot::Ready<gpu::global> !{gpu_async_copy, gpu_await}
+    where host_ctx allows {gpu_async_copy, gpu_await} {
+  own CopySlot::InFlight<gpu::global> pending = CopySlot::begin(@cx; slot, src);
+  return finish(@cx; pending);
+}
+
+// A context-independent procedure can receive and return an owned buffer.
+procedure forward_buffer(data: own buffer<gpu::global>)
+    -> own buffer<gpu::global> {
+  return data;
+}
+
+procedure device_helper(@cx: gpu_ctx; data: buffer<gpu::global>)
+    -> void !{gpu_load} where gpu_ctx allows {gpu_load} {
+  return;
+}
+
+kernel work(@cx: gpu_ctx; data: buffer<gpu::global>)
+    !{gpu_load} where gpu_ctx allows {gpu_load} {
+  device_helper(@cx; data);
+  return;
+}

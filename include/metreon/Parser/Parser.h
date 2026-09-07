@@ -17,8 +17,14 @@ public:
 private:
   ast::ContextDeclaration parseContextDeclaration();
   ast::ResourceDeclaration parseResourceDeclaration();
-  ast::KernelDeclaration parseKernelDeclaration();
-  ast::VariableDeclaration parseVariableDeclaration();
+  ast::CallableDeclaration parseCallableDeclaration(bool isKernel);
+  ast::Statement parseBlock();
+  ast::Statement parseStatement();
+  ast::VariableDeclaration parseVariableDeclaration(ast::ValueType type,
+                                                   bool isConstant);
+  ast::Expression parseExpression();
+  ast::Expression parseNamedExpression(ast::QualifiedName name);
+  std::vector<ast::AllowsClause> parseAllowsClauses();
   ast::LiteralInitializer parseLiteralInitializer();
   ast::ResourceStateDeclaration parseResourceStateDeclaration();
   ast::ResourceAccumulatorDeclaration parseResourceAccumulatorDeclaration();

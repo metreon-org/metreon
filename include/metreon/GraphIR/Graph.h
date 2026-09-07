@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <variant>
@@ -220,35 +221,66 @@ private:
   std::vector<ContextTemplateSpecialization> specializations_;
 };
 
-using KernelVariableId = std::size_t;
+using CallableValueId = std::size_t;
 
-struct KernelVariableNode {
-  KernelVariableId id = 0;
+enum class CallableOperationKind { Literal, Variable, Call, Block, Return };
+
+struct CallableOperation {
+  CallableValueId id = 0;
+  CallableOperationKind kind = CallableOperationKind::Variable;
   std::string name;
   std::map<std::string, std::string> attributes;
+  std::vector<CallableValueId> operands;
+  std::vector<CallableOperation> body;
+  ContextMetadataRef context;
   SourceLocation location;
 };
 
-class KernelGraph {
+struct CallableParameter {
+  // Context parameters have metadata identity, never a runtime value ID.
+  std::optional<CallableValueId> id;
+  std::string name;
+  std::string type;
+  ContextMetadataRef context;
+  SourceLocation location;
+};
+
+class CallableGraph {
 public:
-  KernelGraph(std::string name, SourceLocation location)
+  CallableGraph(std::string name, SourceLocation location)
       : name_(std::move(name)), location_(location) {}
 
-  KernelVariableId addVariable(
-      std::string name, std::map<std::string, std::string> attributes,
-      SourceLocation location);
+  void setSignature(std::map<std::string, std::string> attributes,
+                    ContextMetadataRef context) {
+    attributes_ = std::move(attributes);
+    context_ = std::move(context);
+  }
+  std::optional<CallableValueId> addParameter(std::string name, std::string type,
+                                            ContextMetadataRef context,
+                                            SourceLocation location);
+  CallableOperation makeOperation(CallableOperationKind kind, std::string name,
+                                  SourceLocation location);
+  void setBody(std::vector<CallableOperation> body) { body_ = std::move(body); }
 
   const std::string &name() const noexcept { return name_; }
   const SourceLocation &location() const noexcept { return location_; }
-  const std::vector<KernelVariableNode> &variables() const noexcept {
-    return variables_;
-  }
+  const auto &attributes() const noexcept { return attributes_; }
+  const ContextMetadataRef &context() const noexcept { return context_; }
+  const auto &parameters() const noexcept { return parameters_; }
+  const auto &body() const noexcept { return body_; }
 
 private:
   std::string name_;
   SourceLocation location_;
-  std::vector<KernelVariableNode> variables_;
+  std::map<std::string, std::string> attributes_;
+  ContextMetadataRef context_;
+  std::vector<CallableParameter> parameters_;
+  std::vector<CallableOperation> body_;
+  CallableValueId nextValue_ = 0;
 };
+
+using KernelGraph = CallableGraph;
+using ProcedureGraph = CallableGraph;
 
 class Module {
 public:
@@ -279,6 +311,7 @@ public:
       std::string resourceName, std::string contextParameter,
       SourceLocation location);
   KernelGraph &addKernelGraph(std::string name, SourceLocation location);
+  ProcedureGraph &addProcedureGraph(std::string name, SourceLocation location);
 
   // This is the enforcement point future runtime lowerings must use before
   // consuming context evidence. Every runtime-oriented use is rejected.
@@ -300,6 +333,9 @@ public:
   const std::vector<KernelGraph> &kernelGraphs() const noexcept {
     return kernelGraphs_;
   }
+  const std::vector<ProcedureGraph> &procedureGraphs() const noexcept {
+    return procedureGraphs_;
+  }
   const std::string &sourceName() const noexcept { return sourceName_; }
 
   std::string print() const;
@@ -315,6 +351,7 @@ private:
   std::vector<ResourceGraph> resourceGraphs_;
   std::vector<ResourceContextTemplate> resourceContextTemplates_;
   std::vector<KernelGraph> kernelGraphs_;
+  std::vector<ProcedureGraph> procedureGraphs_;
 };
 
 const char *nodeKindName(NodeKind kind);
