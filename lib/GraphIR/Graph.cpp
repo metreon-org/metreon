@@ -1,4 +1,5 @@
 #include "metreon/GraphIR/Graph.h"
+#include "metreon/GraphIR/ControlFlow.h"
 
 #include <atomic>
 #include <functional>
@@ -467,6 +468,9 @@ std::string Module::print() const {
           if (!operation.attributes.empty()) {
             printAttributes(output, operation.attributes);
           }
+          // All operations need an identity, including void calls, scopes,
+          // and returns that do not define a runtime value.
+          output << " id(#" << prefix << index << "op" << operation.id << ')';
           printContext(operation.context);
           printLocation(operation.location);
           if (isBlock) {
@@ -586,7 +590,80 @@ std::string Module::print() const {
     output << "  }\n";
   }
 
-  output << "}\n";
+  output << "\n  graphir.cfg {\n";
+  auto printControlFlow = [&](const std::vector<CallableGraph> &callables,
+                              const std::string &kind,
+                              const std::string &prefix) {
+    for (std::size_t index = 0; index < callables.size(); ++index) {
+      const auto &callable = callables[index];
+      const auto cfg = buildControlFlow(callable);
+      const auto callablePrefix = prefix + std::to_string(index);
+      const auto blockPrefix = "^" + callablePrefix + "bb";
+      const auto operationPrefix = "#" + callablePrefix + "op";
+      const auto valuePrefix = "%" + callablePrefix + "v";
+      output << "    graphir.cfg." << kind << " @\""
+             << escapeString(callable.name()) << "\" entry("
+             << blockPrefix << cfg.entry << ") parameters(";
+      bool firstParameter = true;
+      for (const auto &parameter : callable.parameters()) {
+        if (!parameter.id) {
+          continue;
+        }
+        if (!firstParameter) {
+          output << ", ";
+        }
+        firstParameter = false;
+        output << valuePrefix << *parameter.id;
+      }
+      output << ')';
+      printLocation(callable.location());
+      output << " {\n";
+      for (const auto &block : cfg.blocks) {
+        output << "      graphir.cfg.block " << blockPrefix << block.id
+               << " scopes(";
+        for (std::size_t scope = 0; scope < block.scopes.size(); ++scope) {
+          if (scope != 0) {
+            output << ", ";
+          }
+          output << operationPrefix << block.scopes[scope];
+        }
+        output << ')';
+        printLocation(block.location);
+        output << " {\n";
+        for (const auto operation : block.operations) {
+          output << "        graphir.cfg.op " << operationPrefix << operation << '\n';
+        }
+        const auto &terminator = block.terminator;
+        if (terminator.kind == ControlFlowTerminatorKind::Branch) {
+          output << "        graphir.cfg.br " << blockPrefix
+                 << terminator.successor.value();
+        } else {
+          output << "        graphir.cfg.return";
+          if (terminator.operation) {
+            output << ' ' << operationPrefix << *terminator.operation;
+          } else {
+            printAttributes(output, {{"implicit", "true"}});
+          }
+          if (!terminator.operands.empty()) {
+            output << " operands(";
+            for (std::size_t operand = 0; operand < terminator.operands.size(); ++operand) {
+              if (operand != 0) {
+                output << ", ";
+              }
+              output << valuePrefix << terminator.operands[operand];
+            }
+            output << ')';
+          }
+        }
+        printLocation(terminator.location);
+        output << "\n      }\n";
+      }
+      output << "    }\n";
+    }
+  };
+  printControlFlow(kernelGraphs_, "kernel", "k");
+  printControlFlow(procedureGraphs_, "procedure", "p");
+  output << "  }\n}\n";
   return output.str();
 }
 
