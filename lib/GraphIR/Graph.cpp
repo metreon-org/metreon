@@ -1,5 +1,6 @@
 #include "metreon/GraphIR/Graph.h"
 #include "metreon/GraphIR/ControlFlow.h"
+#include "metreon/GraphIR/Composition.h"
 
 #include <atomic>
 #include <functional>
@@ -140,7 +141,11 @@ Module::Module(Module &&other) noexcept
       resourceContextTemplates_(
           std::move(other.resourceContextTemplates_)),
       kernelGraphs_(std::move(other.kernelGraphs_)),
-      procedureGraphs_(std::move(other.procedureGraphs_)) {
+      procedureGraphs_(std::move(other.procedureGraphs_)),
+      stageGraphs_(std::move(other.stageGraphs_)),
+      compositionDefinitions_(std::move(other.compositionDefinitions_)),
+      protocolGraphs_(std::move(other.protocolGraphs_)),
+      pipelineGraphs_(std::move(other.pipelineGraphs_)) {
   // Keep a moved-from module valid without letting it mint duplicate keys.
   other.sourceName_.clear();
   other.contexts_.clear();
@@ -150,6 +155,10 @@ Module::Module(Module &&other) noexcept
   other.resourceContextTemplates_.clear();
   other.kernelGraphs_.clear();
   other.procedureGraphs_.clear();
+  other.stageGraphs_.clear();
+  other.compositionDefinitions_.clear();
+  other.protocolGraphs_.clear();
+  other.pipelineGraphs_.clear();
   other.moduleIdentity_ = mintModuleIdentity();
 }
 
@@ -167,6 +176,10 @@ Module &Module::operator=(Module &&other) noexcept {
   resourceContextTemplates_ = std::move(other.resourceContextTemplates_);
   kernelGraphs_ = std::move(other.kernelGraphs_);
   procedureGraphs_ = std::move(other.procedureGraphs_);
+  stageGraphs_ = std::move(other.stageGraphs_);
+  compositionDefinitions_ = std::move(other.compositionDefinitions_);
+  protocolGraphs_ = std::move(other.protocolGraphs_);
+  pipelineGraphs_ = std::move(other.pipelineGraphs_);
   other.sourceName_.clear();
   other.contexts_.clear();
   other.nodes_.clear();
@@ -175,6 +188,10 @@ Module &Module::operator=(Module &&other) noexcept {
   other.resourceContextTemplates_.clear();
   other.kernelGraphs_.clear();
   other.procedureGraphs_.clear();
+  other.stageGraphs_.clear();
+  other.compositionDefinitions_.clear();
+  other.protocolGraphs_.clear();
+  other.pipelineGraphs_.clear();
   other.moduleIdentity_ = mintModuleIdentity();
   return *this;
 }
@@ -488,15 +505,28 @@ std::string Module::print() const {
   };
   printCallables(kernelGraphs_, "kernel", "k");
   printCallables(procedureGraphs_, "procedure", "p");
+  printCallables(stageGraphs_, "stage", "t");
+  output << printCompositions(*this);
 
-  for (const ResourceGraph &resource : resourceGraphs_) {
+  for (std::size_t graphIndex = 0; graphIndex < resourceGraphs_.size(); ++graphIndex) {
+    const ResourceGraph &resource = resourceGraphs_[graphIndex];
     output << '\n';
-    output << "  graphir.resource_graph \"" << escapeString(resource.name())
+    output << "  ";
+    if (!resource.references().empty()) output << "#rg" << graphIndex << " = ";
+    output << "graphir.resource_graph \"" << escapeString(resource.name())
            << '\"';
     printAttributes(output, resource.attributes());
     output << " loc(\"" << escapeString(sourceName_) << "\":"
            << resource.location().line << ':' << resource.location().column
            << ") {\n";
+
+    for (const auto &reference : resource.references()) {
+      output << "    %r" << reference.id << " = graphir.definition_ref @\""
+             << escapeString(definitionName(reference.target)) << '\"';
+      printAttributes(output, {{"kind", definitionKindName(reference.target.kind)}});
+      printLocation(reference.location);
+      output << '\n';
+    }
 
     for (const ResourceStateNode &state : resource.states()) {
       output << "    %s" << state.id << " = graphir.resource_state \""
@@ -663,6 +693,7 @@ std::string Module::print() const {
   };
   printControlFlow(kernelGraphs_, "kernel", "k");
   printControlFlow(procedureGraphs_, "procedure", "p");
+  printControlFlow(stageGraphs_, "stage", "t");
   output << "  }\n}\n";
   return output.str();
 }

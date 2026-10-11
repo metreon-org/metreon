@@ -15,6 +15,14 @@ public:
   ast::Module parseModule();
 
 private:
+  ast::ProtocolDeclaration parseProtocolDeclaration();
+  ast::PipelineDeclaration parsePipelineDeclaration();
+  std::vector<ast::CompositionProperty> parseCompositionProperties();
+  ast::TopologyEndpoint parseTopologyEndpoint();
+  ast::PipelineTopology parseTopology();
+  ast::PipelineSchedule parseSchedule();
+  bool consumeWord(const std::string &word);
+  lexer::Token expectWord(const std::string &word);
   ast::ContextDeclaration parseContextDeclaration();
   ast::ResourceDeclaration parseResourceDeclaration();
   ast::CallableDeclaration parseCallableDeclaration(bool isKernel);

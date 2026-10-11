@@ -1,4 +1,6 @@
 #include "metreon/GraphIR/Lowering.h"
+#include "metreon/GraphIR/Composition.h"
+#include "metreon/Sema/CompositionValidator.h"
 
 #include "metreon/Basic/Diagnostic.h"
 #include "metreon/Sema/ContextValidator.h"
@@ -296,7 +298,7 @@ private:
     const bool isCall = expression.kind == ast::ExpressionKind::Call;
     auto operation = graph_.makeOperation(isCall ? CallableOperationKind::Call
                                                  : CallableOperationKind::Literal,
-                                          isCall ? expression.name.str() : "",
+                                          isCall ? (info.calleeName.empty() ? expression.name.str() : info.calleeName) : "",
                                           expression.location);
     operation.attributes.emplace("type", info.type.str());
     operation.operands = std::move(operands);
@@ -384,6 +386,12 @@ void lowerCallables(const ast::Module &sourceModule, Module &module,
   for (const auto &procedure : sourceModule.procedures) {
     auto &graph = module.addProcedureGraph(procedure.name.str(), procedure.location);
     CallableLowering(graph, analysis, contexts).lower(procedure, false);
+  }
+  for (const auto &pipeline : sourceModule.pipelines) {
+    for (const auto &stage : pipeline.stages) {
+      auto &graph = module.addStageGraph(stage.name.str(), stage.location);
+      CallableLowering(graph, analysis, contexts).lower(stage, false);
+    }
   }
 }
 
@@ -508,6 +516,7 @@ void lowerResourceContextTemplates(const ast::Module &sourceModule,
 Module lowerModule(const ast::Module &sourceModule, std::string sourceName) {
   sema::validateContexts(sourceModule);
   sema::validateResources(sourceModule);
+  sema::validateCompositions(sourceModule);
   const auto callableAnalysis = sema::validateCallables(sourceModule);
 
   Module graph(std::move(sourceName));
@@ -570,6 +579,7 @@ Module lowerModule(const ast::Module &sourceModule, std::string sourceName) {
 
   lowerCallables(sourceModule, graph, callableAnalysis, contextsByIdentifier);
   lowerResources(sourceModule, graph);
+  lowerCompositions(sourceModule, graph);
   lowerResourceContextTemplates(sourceModule, graph, contextsByIdentifier);
 
   return graph;

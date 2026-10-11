@@ -41,6 +41,11 @@ enum class TokenKind {
   Equal,
   Minus,
   Arrow,
+  FatArrow,
+  Dot,
+  DotDot,
+  LeftBracket,
+  RightBracket,
 };
 
 struct Token {

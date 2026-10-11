@@ -1,0 +1,91 @@
+// Minimal structural example adapted from TACHYON_MASTER_PLAN.md, section 8.4.
+// The frontend validates this structure and lowers it to GraphIR.
+// Stage bodies use supported scalar declarations and returns; no channel I/O or GEMM.
+
+protocol TileFlow roles producer, consumer {
+    state Open {
+        producer -> consumer: tile(value: f32) => Open;
+        producer -> consumer: stop => End;
+    }
+
+    state End final;
+}
+
+pipeline TiledGemm(
+    input a: f32,
+    input b: f32,
+    output c: f32
+) {
+    state epoch: u64 {
+        lifetime pipeline;
+        placement host::pinned;
+        initial 0;
+    }
+
+    edge a_tiles: channel<TileFlow> {
+        initial Open;
+        capacity 1;
+        storage gpu::shared;
+        scope block;
+        delivery uniform<Block>;
+        backpressure cooperative;
+    }
+
+    edge b_tiles: channel<TileFlow> {
+        initial Open;
+        capacity 1;
+        storage gpu::shared;
+        scope block;
+        delivery uniform<Block>;
+        backpressure cooperative;
+    }
+
+    stage load_a(
+        src: f32,
+        out: TileFlow::producer<Open>,
+        epoch: u64
+    ) -> void {
+        f32 value = src;
+        u64 current_epoch = epoch;
+        return;
+    }
+
+    stage load_b(
+        src: f32,
+        out: TileFlow::producer<Open>,
+        epoch: u64
+    ) -> void {
+        f32 value = src;
+        u64 current_epoch = epoch;
+        return;
+    }
+
+    stage mma(
+        a_in: TileFlow::consumer<Open>,
+        b_in: TileFlow::consumer<Open>,
+        dst: f32
+    ) -> void {
+        f32 result = 0.0;
+        return;
+    }
+
+    topology {
+        a          => load_a.src;
+        b          => load_b.src;
+        epoch      => load_a.epoch;
+        epoch      => load_b.epoch;
+        load_a.out =>[a_tiles] mma.a_in;
+        load_b.out =>[b_tiles] mma.b_in;
+        mma.dst    => c;
+    }
+
+    schedule sm90 {
+        kernel worker = fuse(load_a, load_b, mma) {
+            blocks 1;
+        }
+
+        place load_a on worker.warp[0];
+        place load_b on worker.warp[1];
+        place mma    on worker.warp[2];
+    }
+}

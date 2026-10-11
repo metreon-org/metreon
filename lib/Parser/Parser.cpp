@@ -11,6 +11,14 @@ Parser::Parser(std::string_view source) : lexer_(source), current_(lexer_.next()
 ast::Module Parser::parseModule() {
   ast::Module module;
   while (current_.kind != lexer::TokenKind::EndOfFile) {
+    if (current_.kind == lexer::TokenKind::Identifier && current_.text == "protocol") {
+      module.protocols.push_back(parseProtocolDeclaration());
+      continue;
+    }
+    if (current_.kind == lexer::TokenKind::Identifier && current_.text == "pipeline") {
+      module.pipelines.push_back(parsePipelineDeclaration());
+      continue;
+    }
     if (current_.kind == lexer::TokenKind::KeywordContext) {
       module.contexts.push_back(parseContextDeclaration());
       continue;
@@ -28,7 +36,7 @@ ast::Module Parser::parseModule() {
       continue;
     }
     fail("parse.expected_declaration",
-         "expected a context, resource, kernel, or procedure declaration, found " +
+         "expected a context, resource, kernel, procedure, protocol, or pipeline declaration, found " +
              std::string(lexer::tokenKindName(current_.kind)));
   }
   return module;

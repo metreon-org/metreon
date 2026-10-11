@@ -130,6 +130,25 @@ struct Edge {
 
 using ResourceNodeId = std::size_t;
 
+enum class DefinitionKind { Protocol, ProtocolState, PipelineState, PipelineEdge,
+                            Stage, Topology, Schedule };
+
+struct DefinitionReference {
+  DefinitionKind kind = DefinitionKind::ProtocolState;
+  std::size_t index = 0;
+};
+
+struct ResourceDefinitionReference {
+  ResourceNodeId id = 0;
+  DefinitionReference target;
+  SourceLocation location;
+};
+
+struct ResourceMemberReference {
+  std::size_t graph = 0;
+  ResourceNodeId member = 0;
+};
+
 struct ResourceStateNode {
   ResourceNodeId id = 0;
   std::string name;
@@ -170,6 +189,12 @@ public:
   const std::vector<ResourceTransitionEdge> &transitions() const noexcept {
     return transitions_;
   }
+  ResourceNodeId addReference(DefinitionReference target, SourceLocation location) {
+    const auto id = references_.size();
+    references_.push_back({id, target, location});
+    return id;
+  }
+  const auto &references() const noexcept { return references_; }
 
 private:
   std::string name_;
@@ -177,6 +202,7 @@ private:
   SourceLocation location_;
   std::vector<ResourceStateNode> states_;
   std::vector<ResourceTransitionEdge> transitions_;
+  std::vector<ResourceDefinitionReference> references_;
 };
 
 struct ResourceTypeCheck {
@@ -281,6 +307,37 @@ private:
 
 using KernelGraph = CallableGraph;
 using ProcedureGraph = CallableGraph;
+using StageGraph = CallableGraph;
+
+struct CompositionRecord {
+  std::string kind;
+  std::string name;
+  std::map<std::string, std::string> attributes;
+  std::vector<DefinitionReference> references;
+  SourceLocation location;
+};
+
+struct CompositionDefinition {
+  DefinitionKind kind;
+  std::string name;
+  std::map<std::string, std::string> attributes;
+  std::vector<CompositionRecord> records;
+  SourceLocation location;
+};
+
+struct ProtocolGraph {
+  std::string name;
+  std::vector<std::string> roles;
+  std::vector<ResourceMemberReference> members;
+  SourceLocation location;
+};
+
+struct PipelineGraph {
+  std::string name;
+  std::vector<CompositionRecord> parameters;
+  std::vector<ResourceMemberReference> members;
+  SourceLocation location;
+};
 
 class Module {
 public:
@@ -312,6 +369,16 @@ public:
       SourceLocation location);
   KernelGraph &addKernelGraph(std::string name, SourceLocation location);
   ProcedureGraph &addProcedureGraph(std::string name, SourceLocation location);
+  StageGraph &addStageGraph(std::string name, SourceLocation location);
+  DefinitionReference addCompositionDefinition(CompositionDefinition definition);
+  CompositionDefinition &compositionDefinition(DefinitionReference reference);
+  std::string definitionName(DefinitionReference reference) const;
+  ResourceMemberReference addResourceReference(std::size_t graph,
+                                               DefinitionReference definition,
+                                               SourceLocation location);
+  ProtocolGraph &addProtocolGraph(std::string name, SourceLocation location);
+  void setProtocolMembers(std::size_t index, std::vector<ResourceMemberReference> members);
+  PipelineGraph &addPipelineGraph(PipelineGraph group);
 
   // This is the enforcement point future runtime lowerings must use before
   // consuming context evidence. Every runtime-oriented use is rejected.
@@ -336,6 +403,10 @@ public:
   const std::vector<ProcedureGraph> &procedureGraphs() const noexcept {
     return procedureGraphs_;
   }
+  const auto &stageGraphs() const noexcept { return stageGraphs_; }
+  const auto &compositionDefinitions() const noexcept { return compositionDefinitions_; }
+  const auto &protocolGraphs() const noexcept { return protocolGraphs_; }
+  const auto &pipelineGraphs() const noexcept { return pipelineGraphs_; }
   const std::string &sourceName() const noexcept { return sourceName_; }
 
   std::string print() const;
@@ -352,7 +423,13 @@ private:
   std::vector<ResourceContextTemplate> resourceContextTemplates_;
   std::vector<KernelGraph> kernelGraphs_;
   std::vector<ProcedureGraph> procedureGraphs_;
+  std::vector<StageGraph> stageGraphs_;
+  std::vector<CompositionDefinition> compositionDefinitions_;
+  std::vector<ProtocolGraph> protocolGraphs_;
+  std::vector<PipelineGraph> pipelineGraphs_;
 };
+
+const char *definitionKindName(DefinitionKind kind);
 
 const char *nodeKindName(NodeKind kind);
 const char *edgeKindName(EdgeKind kind);

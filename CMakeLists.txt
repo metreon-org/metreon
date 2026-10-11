@@ -20,11 +20,14 @@ endfunction()
 add_library(metreon_frontend
     lib/GraphIR/ControlFlow.cpp
     lib/GraphIR/Graph.cpp
+    lib/GraphIR/Composition.cpp
     lib/GraphIR/Lowering.cpp
     lib/Lexer/Lexer.cpp
     lib/Parser/Parser.cpp
+    lib/Parser/CompositionParser.cpp
     lib/Sema/ContextValidator.cpp
     lib/Sema/CallableValidator.cpp
+    lib/Sema/CompositionValidator.cpp
 )
 
 target_include_directories(metreon_frontend
@@ -41,6 +44,11 @@ metreon_enable_warnings(metreonc)
 include(CTest)
 
 if(BUILD_TESTING)
+    add_executable(metreon_composition_tests tests/CompositionTests.cpp)
+    target_link_libraries(metreon_composition_tests PRIVATE metreon_frontend)
+    metreon_enable_warnings(metreon_composition_tests)
+    add_test(NAME metreon.frontend.compositions
+        COMMAND metreon_composition_tests ${CMAKE_CURRENT_SOURCE_DIR}/examples/protocols_and_pipelines.mtr)
     add_executable(metreon_control_flow_tests tests/ControlFlowTests.cpp)
     target_link_libraries(metreon_control_flow_tests PRIVATE metreon_frontend)
     metreon_enable_warnings(metreon_control_flow_tests)
@@ -56,6 +64,8 @@ if(BUILD_TESTING)
                 ${ARGN}
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/GraphIRCliTests.cmake)
     endfunction()
+    metreon_add_graphir_cli_test(metreon.frontend.pipeline.cli protocols_and_pipelines
+        "graphir.pipeline.*TiledGemm")
     metreon_add_graphir_cli_test(metreon.graphir.file.stdin procedures
         "graphir.cfg.procedure" -DSTDIN_INPUT=ON)
     metreon_add_graphir_cli_test(metreon.graphir.file.default procedures

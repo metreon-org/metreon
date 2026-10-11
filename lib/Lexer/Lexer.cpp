@@ -91,6 +91,11 @@ const char *tokenKindName(TokenKind kind) {
     return "`-`";
   case TokenKind::Arrow:
     return "`->`";
+  case TokenKind::FatArrow: return "`=>`";
+  case TokenKind::Dot: return "`.`";
+  case TokenKind::DotDot: return "`..`";
+  case TokenKind::LeftBracket: return "`[`";
+  case TokenKind::RightBracket: return "`]`";
   }
   return "unknown token";
 }
@@ -300,7 +305,13 @@ Token Lexer::next() {
   case '!':
     return punctuation(TokenKind::Bang);
   case '=':
+    if (peek() == '>') return punctuation(TokenKind::FatArrow, 2);
     return punctuation(TokenKind::Equal);
+  case '.':
+    if (peek() == '.') return punctuation(TokenKind::DotDot, 2);
+    return punctuation(TokenKind::Dot);
+  case '[': return punctuation(TokenKind::LeftBracket);
+  case ']': return punctuation(TokenKind::RightBracket);
   case '-':
     if (peek() == '>') {
       return punctuation(TokenKind::Arrow, 2);

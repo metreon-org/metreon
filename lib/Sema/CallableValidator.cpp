@@ -93,59 +93,11 @@ private:
   const ast::ContextDeclaration *context_ = nullptr;
   std::string contextParameter_;
   bool isKernel_ = false;
+  std::unordered_map<const ast::CallableDeclaration *, std::string> stagePipelines_;
 };
 
 void Validator::validateType(const ast::ValueType &type, bool allowVoid) const {
-  const auto &reference = type.reference;
-  const std::string name = reference.name.str();
-  const auto state = states_.find(name);
-  if (state != states_.end()) {
-    if (reference.arguments.size() != state->second->parameters.size()) {
-      fail("type_arity", "wrong generic arity for resource state `" + name + "`",
-           type.location);
-    }
-    if (type.ownership != ast::OwnershipQualifier::Own) {
-      fail("resource_not_owned", "resource state values require `own`", type.location);
-    }
-    for (std::size_t index = 0; index < reference.arguments.size(); ++index) {
-      if (state->second->parameters[index].constraint.str() == "Context" &&
-          !contexts_.contains(reference.arguments[index].str())) {
-        fail("invalid_context_argument",
-             "a resource's `Context` argument must name a declared context",
-             type.location);
-      }
-    }
-    return;
-  }
-  if (contexts_.contains(name) || name == "Context" ||
-      std::any_of(module_.contexts.begin(), module_.contexts.end(),
-                  [&](const auto &context) { return context.name.str() == name; })) {
-    fail("runtime_context_value", "context evidence cannot be a runtime value",
-         type.location);
-  }
-  if (name == "void") {
-    if (!allowVoid || type.ownership == ast::OwnershipQualifier::Own ||
-        !reference.arguments.empty()) {
-      fail("invalid_void_type", "`void` is only an unowned callable return type",
-           type.location);
-    }
-    return;
-  }
-  if (name == "bool" || isInteger(name) || isFloating(name)) {
-    if (!reference.arguments.empty()) {
-      fail("type_arity", "scalar types do not take generic arguments", type.location);
-    }
-    return;
-  }
-  if (name == "buffer" || name == "view" || name == "event") {
-    const std::size_t arity = name == "view" ? 2 : 1;
-    if (reference.arguments.size() != arity) {
-      fail("type_arity", "wrong generic arity for `" + name + "`", type.location);
-    }
-    return;
-  }
-  fail("unknown_value_type", "unknown value type `" + reference.str() + "`",
-       type.location);
+  validateValueType(module_, type, allowVoid);
 }
 
 void Validator::requireCapabilities(
@@ -244,33 +196,36 @@ CallableAnalysis Validator::run() {
   };
   add(module_.kernels, true);
   add(module_.procedures, false);
-  // Validate in source-vector order for deterministic diagnostics. Index all
-  // signatures first so forward calls and recursion see the same contracts.
-  for (const auto *declarations : {&module_.kernels, &module_.procedures}) {
-    for (const auto &declaration : *declarations) {
-      validateSignature(callables_.at(declaration.name.str()));
-    }
+  for (const auto &pipeline : module_.pipelines) {
+    add(pipeline.stages, false);
+    for (const auto &stage : pipeline.stages)
+      stagePipelines_.emplace(&stage, pipeline.name.str());
   }
-  for (const auto *declarations : {&module_.kernels, &module_.procedures}) {
-    for (const auto &declaration : *declarations) {
-      current_ = &declaration;
-      isKernel_ = callables_.at(declaration.name.str()).isKernel;
-      context_ = analysis_.contexts.at(current_);
-      contextParameter_ = context_ ? "cx" : "";
-      scopes_.clear();
-      scopes_.emplace_back();
-      for (const auto &parameter : declaration.parameters) {
-        if (!parameter.isContextEvidence) {
-          scopes_.back().emplace(parameter.name, Local{parameter.type, true});
-        }
-      }
-      const bool returns = block(declaration.body, false);
-      if (!isVoid(declaration.resultType) && !returns) {
-        fail("missing_return", "procedure `" + declaration.name.str() +
-                                   "` must return `" + declaration.resultType.str() + "`",
-             declaration.location);
-      }
+  std::vector<const ast::CallableDeclaration *> declarations;
+  for (const auto *items : {&module_.kernels, &module_.procedures}) {
+    for (const auto &item : *items) declarations.push_back(&item);
+  }
+  for (const auto &pipeline : module_.pipelines) {
+    for (const auto &stage : pipeline.stages) declarations.push_back(&stage);
+  }
+  // Index every signature first, including pipeline-scoped stages.
+  for (const auto *declaration : declarations)
+    validateSignature(callables_.at(declaration->name.str()));
+  for (const auto *declaration : declarations) {
+    current_ = declaration;
+    isKernel_ = callables_.at(declaration->name.str()).isKernel;
+    context_ = analysis_.contexts.at(current_);
+    contextParameter_ = context_ ? "cx" : "";
+    scopes_.clear();
+    scopes_.emplace_back();
+    for (const auto &parameter : declaration->parameters) {
+      if (!parameter.isContextEvidence)
+        scopes_.back().emplace(parameter.name, Local{parameter.type, true});
     }
+    const bool returns = block(declaration->body, false);
+    if (!isVoid(declaration->resultType) && !returns)
+      fail("missing_return", "callable `" + declaration->name.str() +
+           "` must return `" + declaration->resultType.str() + "`", declaration->location);
   }
   return std::move(analysis_);
 }
@@ -338,18 +293,8 @@ void Validator::match(const ast::Expression &expr, const ast::ValueType &actual,
                       const ast::ValueType &expected) {
   bool matches = actual.str() == expected.str();
   if (expr.kind == ast::ExpressionKind::Literal) {
-    const std::string name = expected.reference.name.str();
-    const auto kind = expr.literal.kind;
-    matches = expected.ownership == ast::OwnershipQualifier::None &&
-              expected.reference.arguments.empty() &&
-              ((kind == ast::LiteralKind::Boolean && name == "bool") ||
-               (kind == ast::LiteralKind::Integer && isInteger(name)) ||
-               ((kind == ast::LiteralKind::Floating || kind == ast::LiteralKind::Infinity) &&
-                isFloating(name)));
-    if (kind == ast::LiteralKind::Integer && !name.empty() && name.front() == 'u' &&
-        expr.literal.value.front() == '-') {
-      matches = false;
-    }
+    validateLiteralType(expected, expr.literal);
+    matches = true;
   }
   if (!matches) {
     fail("type_mismatch", "expected `" + expected.str() + "`, found `" + actual.str() + "`",
@@ -457,7 +402,12 @@ ast::ValueType Validator::call(const ast::Expression &expr) {
   if (transition != transitions_.end()) {
     return transitionCall(expr, transition->second);
   }
-  const auto found = callables_.find(expr.name.str());
+  auto found = callables_.find(expr.name.str());
+  const auto enclosing = stagePipelines_.find(current_);
+  if (expr.name.components.size() == 1 && enclosing != stagePipelines_.end()) {
+    const auto scoped = callables_.find(enclosing->second + "::" + expr.name.str());
+    if (scoped != callables_.end()) found = scoped;
+  }
   if (found == callables_.end()) {
     fail("unknown_operation", "unknown operation `" + expr.name.str() + "`", expr.location);
   }
@@ -465,6 +415,10 @@ ast::ValueType Validator::call(const ast::Expression &expr) {
     fail("kernel_call", "kernels cannot be invoked as ordinary procedure calls", expr.location);
   }
   const auto &callee = *found->second.declaration;
+  const auto stageOwner = stagePipelines_.find(&callee);
+  if (stageOwner != stagePipelines_.end() &&
+      (enclosing == stagePipelines_.end() || enclosing->second != stageOwner->second))
+    fail("stage_call_outside_pipeline", "stage calls must stay within their pipeline", expr.location);
   if (expr.arguments.size() != callee.parameters.size()) {
     fail("call_arity", "wrong argument count for `" + expr.name.str() + "`", expr.location);
   }
@@ -484,7 +438,8 @@ ast::ValueType Validator::call(const ast::Expression &expr) {
     }
   }
   auto &info = analysis_.expressions[&expr];
-  info.calleeKind = "procedure";
+  info.calleeName = callee.name.str();
+  info.calleeKind = stageOwner == stagePipelines_.end() ? "procedure" : "stage";
   info.context = calleeContext;
   info.effects = callee.effects;
   return callee.resultType;
@@ -647,6 +602,81 @@ ast::ValueType Validator::transitionCall(const ast::Expression &expr,
 }
 
 } // namespace
+
+void validateValueType(const ast::Module &module, const ast::ValueType &type,
+                       bool allowVoid) {
+  const auto &reference = type.reference;
+  const auto name = reference.name.str();
+  auto declaredContext = [&](const std::string &identifier) {
+    return std::any_of(module.contexts.begin(), module.contexts.end(),
+                       [&](const auto &cx) { return cx.identifier == identifier; });
+  };
+  for (const auto &resource : module.resources) {
+    for (const auto &state : resource.states) {
+      if (resource.name.str() + "::" + state.name != name) continue;
+      if (reference.arguments.size() != resource.parameters.size())
+        fail("type_arity", "wrong generic arity for resource state `" + name + "`", type.location);
+      if (type.ownership != ast::OwnershipQualifier::Own)
+        fail("resource_not_owned", "resource state values require `own`", type.location);
+      for (std::size_t i = 0; i < reference.arguments.size(); ++i) {
+        if (resource.parameters[i].constraint.str() == "Context" &&
+            !declaredContext(reference.arguments[i].str()))
+          fail("invalid_context_argument", "a resource's `Context` argument must name a declared context", type.location);
+      }
+      return;
+    }
+  }
+  for (const auto &protocol : module.protocols) {
+    auto components = reference.name.components;
+    if (components.size() < 2) continue;
+    const auto role = components.back();
+    components.pop_back();
+    if (ast::QualifiedName{components, reference.location}.str() != protocol.name.str()) continue;
+    if (std::none_of(protocol.roles.begin(), protocol.roles.end(),
+                     [&](const auto &candidate) { return candidate.name == role; }))
+      fail("unknown_protocol_role", "unknown protocol endpoint role `" + role + "`", type.location);
+    if (reference.arguments.size() != 1 || !reference.arguments[0].arguments.empty() ||
+        reference.arguments[0].name.components.size() != 1)
+      fail("type_arity", "protocol endpoints require one state argument", type.location);
+    const auto stateName = reference.arguments[0].str();
+    if (std::none_of(protocol.states.begin(), protocol.states.end(),
+                     [&](const auto &state) { return state.name == stateName; }))
+      fail("unknown_protocol_state", "unknown endpoint state `" + stateName + "`", type.location);
+    return;
+  }
+  if (declaredContext(name) || name == "Context" ||
+      std::any_of(module.contexts.begin(), module.contexts.end(),
+                  [&](const auto &cx) { return cx.name.str() == name; }))
+    fail("runtime_context_value", "context evidence cannot be a runtime value", type.location);
+  if (name == "void") {
+    if (!allowVoid || type.ownership == ast::OwnershipQualifier::Own || !reference.arguments.empty())
+      fail("invalid_void_type", "`void` is only an unowned callable return type", type.location);
+    return;
+  }
+  if (name == "bool" || isInteger(name) || isFloating(name)) {
+    if (!reference.arguments.empty()) fail("type_arity", "scalar types do not take generic arguments", type.location);
+    return;
+  }
+  if (name == "buffer" || name == "view" || name == "event") {
+    if (reference.arguments.size() != (name == "view" ? 2u : 1u))
+      fail("type_arity", "wrong generic arity for `" + name + "`", type.location);
+    return;
+  }
+  fail("unknown_value_type", "unknown value type `" + reference.str() + "`", type.location);
+}
+
+void validateLiteralType(const ast::ValueType &type,
+                         const ast::LiteralInitializer &literal) {
+  const auto name = type.reference.name.str();
+  const auto kind = literal.kind;
+  const bool matches = type.ownership == ast::OwnershipQualifier::None &&
+      type.reference.arguments.empty() &&
+      ((kind == ast::LiteralKind::Boolean && name == "bool") ||
+       (kind == ast::LiteralKind::Integer && isInteger(name) &&
+        !(name.front() == 'u' && literal.value.front() == '-')) ||
+       ((kind == ast::LiteralKind::Floating || kind == ast::LiteralKind::Infinity) && isFloating(name)));
+  if (!matches) fail("type_mismatch", "literal does not match `" + type.str() + "`", literal.location);
+}
 
 CallableAnalysis validateCallables(const ast::Module &module) {
   return Validator(module).run();
