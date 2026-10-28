@@ -1,5 +1,6 @@
 #include "metreon/Basic/Diagnostic.h"
 #include "metreon/GraphIR/Lowering.h"
+#include "metreon/GraphIR/Passes.h"
 #include "metreon/Parser/Parser.h"
 
 #include <filesystem>
@@ -12,8 +13,9 @@
 namespace {
 
 void printUsage(std::ostream &output) {
-  output << "usage: metreonc [--emit=graphir] <input.mtr>\n"
-            "       metreonc [--emit=graphir] -\n"
+  output << "usage: metreonc [--emit=graphir | --emit graphir] [--no-optimization] <input.mtr>\n"
+            "       metreonc [--emit=graphir | --emit graphir] [--no-optimization] -\n"
+            "GraphIR optimization passes run by default; --no-optimization skips them.\n"
             "Writes <input-stem>.graphir (stdin.graphir for -) to\n"
             "  tmp/graphir/ relative to the current working directory.\n";
 }
@@ -36,6 +38,7 @@ std::string readSource(const std::string &path) {
 
 int main(int argc, char **argv) {
   std::string inputPath;
+  bool optimize = true;
 
   for (int index = 1; index < argc; ++index) {
     const std::string argument = argv[index];
@@ -44,6 +47,19 @@ int main(int argc, char **argv) {
       return 0;
     }
     if (argument == "--emit=graphir") {
+      continue;
+    }
+    if (argument == "--emit") {
+      if (index + 1 >= argc || std::string(argv[index + 1]) != "graphir") {
+        std::cerr << "metreonc: --emit requires the format `graphir`\n";
+        printUsage(std::cerr);
+        return 1;
+      }
+      ++index;
+      continue;
+    }
+    if (argument == "--no-optimization") {
+      optimize = false;
       continue;
     }
     if (!argument.empty() && argument.front() == '-' && argument != "-") {
@@ -70,8 +86,9 @@ int main(int argc, char **argv) {
     const std::string source = readSource(inputPath);
     metreon::parser::Parser parser(source);
     const metreon::ast::Module module = parser.parseModule();
-    const metreon::graphir::Module graph =
+    metreon::graphir::Module graph =
         metreon::graphir::lowerModule(module, sourceName);
+    if (optimize) metreon::graphir::passes::runDefaultPipeline(graph);
     // Serialize completely before opening an output so validation failures do
     // not truncate an existing artifact. Resolve output relative to the caller's
     // working directory, independently of the input or executable location.

@@ -6,7 +6,9 @@
 #include "metreon/Sema/ContextValidator.h"
 #include "metreon/Sema/CallableValidator.h"
 
+#include <algorithm>
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -202,6 +204,8 @@ void lowerResources(const ast::Module &sourceModule, Module &module) {
           state.name, std::move(attributes), state.location);
       states.emplace(state.name, stateNode);
     }
+    // Resource validation defines the first declared state as the entry.
+    if (!resource.states.empty()) graph.addEntryState(states.at(resource.states.front().name));
 
     for (const ast::ResourceTransitionDeclaration &transition :
          resource.transitions) {
@@ -511,6 +515,93 @@ void lowerResourceContextTemplates(const ast::Module &sourceModule,
   }
 }
 
+// Add typed entries while structured types and resolved expressions are
+// available, in addition to each resource's validated initial state.
+void lowerEntryStates(const ast::Module &source, Module &module,
+                      const sema::CallableAnalysis &analysis) {
+  std::map<std::string, std::pair<std::size_t, ResourceNodeId>> resources;
+  std::map<std::string, std::pair<std::size_t, DefinitionReference>> protocols;
+  for (std::size_t index = 0; index < module.resourceGraphs().size(); ++index) {
+    const auto &graph = module.resourceGraphs()[index];
+    for (const auto &state : graph.states())
+      resources.emplace(graph.name() + "::" + state.name, std::pair{index, state.id});
+  }
+  for (std::size_t index = 0; index < module.protocolGraphs().size(); ++index) {
+    for (const auto &member : module.protocolGraphs()[index].members) {
+      const auto target = module.resourceGraphs()[member.graph].references()[member.member].target;
+      protocols.emplace(module.definitionName(target), std::pair{index, target});
+    }
+  }
+  const auto protocolEntry = [&](const std::string &name) {
+    const auto found = protocols.find(name);
+    if (found == protocols.end()) return;
+    const auto [index, reference] = found->second;
+    auto &entries = module.protocolGraphs()[index].entryStates;
+    if (std::none_of(entries.begin(), entries.end(), [&](const auto &entry) {
+          return entry.kind == reference.kind && entry.index == reference.index;
+        }))
+      entries.push_back(reference);
+  };
+  std::function<void(const ast::TypeReference &)> type;
+  type = [&](const auto &reference) {
+    const auto name = reference.name.str();
+    if (const auto found = resources.find(name); found != resources.end()) {
+      const auto [graph, state] = found->second;
+      module.resourceGraphs()[graph].addEntryState(state);
+    }
+    protocolEntry(name);
+    if (reference.name.components.size() > 1 && !reference.arguments.empty()) {
+      auto owner = reference.name.components;
+      owner.pop_back();
+      protocolEntry(ast::QualifiedName{owner, reference.location}.str() + "::" +
+                    reference.arguments.front().name.str());
+    }
+    for (const auto &argument : reference.arguments) type(argument);
+  };
+  std::function<void(const ast::Expression &)> expression;
+  expression = [&](const auto &value) {
+    if (const auto found = analysis.expressions.find(&value); found != analysis.expressions.end())
+      type(found->second.type.reference);
+    for (const auto &argument : value.arguments) expression(argument);
+  };
+  std::function<void(const ast::Statement &)> statement;
+  statement = [&](const auto &value) {
+    if (value.kind == ast::StatementKind::Variable) {
+      type(value.variable.type.reference);
+      if (value.variable.initializer) expression(*value.variable.initializer);
+    }
+    if (value.expression) expression(*value.expression);
+    for (const auto &nested : value.statements) statement(nested);
+  };
+  const auto callable = [&](const ast::CallableDeclaration &value) {
+    for (const auto &parameter : value.parameters) type(parameter.type.reference);
+    type(value.resultType.reference);
+    statement(value.body);
+  };
+  for (const auto &kernel : source.kernels) callable(kernel);
+  for (const auto &procedure : source.procedures) callable(procedure);
+  for (const auto &resource : source.resources) {
+    for (const auto &state : resource.states)
+      for (const auto &field : state.fields) type(field.type.reference);
+    for (const auto &transition : resource.transitions)
+      for (const auto &parameter : transition.parameters) type(parameter.type.reference);
+  }
+  for (const auto &protocol : source.protocols)
+    for (const auto &state : protocol.states)
+      for (const auto &message : state.messages)
+        for (const auto &field : message.payload) type(field.type.reference);
+  for (const auto &pipeline : source.pipelines) {
+    for (const auto &parameter : pipeline.parameters) type(parameter.type.reference);
+    for (const auto &state : pipeline.states) type(state.type.reference);
+    for (const auto &stage : pipeline.stages) callable(stage);
+    for (const auto &edge : pipeline.edges) {
+      for (const auto &property : edge.properties)
+        if (property.name == "initial")
+          protocolEntry(edge.type.arguments.front().name.str() + "::" + property.str());
+    }
+  }
+}
+
 } // namespace
 
 Module lowerModule(const ast::Module &sourceModule, std::string sourceName) {
@@ -581,6 +672,7 @@ Module lowerModule(const ast::Module &sourceModule, std::string sourceName) {
   lowerResources(sourceModule, graph);
   lowerCompositions(sourceModule, graph);
   lowerResourceContextTemplates(sourceModule, graph, contextsByIdentifier);
+  lowerEntryStates(sourceModule, graph, callableAnalysis);
 
   return graph;
 }

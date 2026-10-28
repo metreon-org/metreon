@@ -1,5 +1,7 @@
 #include "metreon/GraphIR/Composition.h"
 
+#include <algorithm>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -51,6 +53,74 @@ std::string Module::definitionName(DefinitionReference reference) const {
     return compositionDefinitions_[reference.index].name;
   }
   throw std::logic_error("GraphIR definition reference has an unknown target");
+}
+
+void Module::eraseCompositionDefinitions(const std::vector<std::size_t> &indices) {
+  if (indices.empty()) return;
+  std::vector<bool> removed(compositionDefinitions_.size(), false);
+  for (const auto index : indices) {
+    if (index >= removed.size())
+      throw std::logic_error("cannot erase an unknown GraphIR definition");
+    removed[index] = true;
+  }
+  std::vector<std::optional<std::size_t>> remapping(removed.size());
+  std::size_t next = 0;
+  for (std::size_t index = 0; index < removed.size(); ++index)
+    if (!removed[index]) remapping[index] = next++;
+  const auto isRemoved = [&](DefinitionReference reference) {
+    return reference.kind != DefinitionKind::Protocol &&
+           reference.kind != DefinitionKind::Stage && removed.at(reference.index);
+  };
+  const auto remap = [&](DefinitionReference &reference) {
+    if (reference.kind == DefinitionKind::Protocol || reference.kind == DefinitionKind::Stage)
+      return;
+    if (!remapping.at(reference.index))
+      throw std::logic_error("live GraphIR definition references an erased target");
+    reference.index = *remapping[reference.index];
+  };
+  for (std::size_t index = 0; index < compositionDefinitions_.size(); ++index) {
+    if (removed[index]) continue;
+    for (auto &record : compositionDefinitions_[index].records) {
+      for (auto &reference : record.references) remap(reference);
+      for (auto &region : record.contextRegions)
+        for (auto &reference : region.stages) remap(reference);
+    }
+  }
+  std::vector<std::vector<std::optional<std::size_t>>> memberRemapping;
+  for (auto &graph : resourceGraphs_) {
+    auto &references = graph.references();
+    std::vector<std::optional<std::size_t>> members(references.size());
+    std::vector<ResourceDefinitionReference> retained;
+    for (auto reference : references) {
+      if (isRemoved(reference.target)) continue;
+      members.at(reference.id) = retained.size();
+      reference.id = retained.size();
+      remap(reference.target);
+      retained.push_back(std::move(reference));
+    }
+    references = std::move(retained);
+    memberRemapping.push_back(std::move(members));
+  }
+  const auto remapMembers = [&](std::vector<ResourceMemberReference> &members) {
+    std::vector<ResourceMemberReference> retained;
+    for (auto member : members) {
+      const auto &replacement = memberRemapping.at(member.graph).at(member.member);
+      if (!replacement) continue;
+      member.member = *replacement;
+      retained.push_back(member);
+    }
+    members = std::move(retained);
+  };
+  for (auto &protocol : protocolGraphs_) {
+    remapMembers(protocol.members);
+    std::erase_if(protocol.entryStates, isRemoved);
+    for (auto &reference : protocol.entryStates) remap(reference);
+  }
+  for (auto &pipeline : pipelineGraphs_) remapMembers(pipeline.members);
+  std::vector<CompositionDefinition> retained;
+  for (std::size_t index = 0; index < compositionDefinitions_.size(); ++index)
+    if (!removed[index]) retained.push_back(std::move(compositionDefinitions_[index]));
+  compositionDefinitions_ = std::move(retained);
 }
 
 ResourceMemberReference Module::addResourceReference(
@@ -259,20 +329,33 @@ std::string printCompositions(const Module &module) {
   auto location = [&](SourceLocation loc) {
     output << " loc(\"" << escaped(module.sourceName()) << "\":" << loc.line << ':' << loc.column << ')';
   };
+  auto references = [&](const std::vector<DefinitionReference> &values) {
+    output << " refs(";
+    for (std::size_t index = 0; index < values.size(); ++index) {
+      if (index) output << ", ";
+      output << "@\"" << escaped(module.definitionName(values[index])) << '"';
+    }
+    output << ')';
+  };
   auto record = [&](const CompositionRecord &value) {
     output << "    graphir." << value.kind;
     if (!value.name.empty()) output << " \"" << escaped(value.name) << '"';
     attributes(value.attributes);
-    if (!value.references.empty()) {
-      output << " refs(";
-      for (std::size_t i = 0; i < value.references.size(); ++i) {
-        if (i) output << ", ";
-        output << "@\"" << escaped(module.definitionName(value.references[i])) << '"';
-      }
-      output << ')';
-    }
+    if (!value.references.empty()) references(value.references);
     location(value.location);
-    output << '\n';
+    if (value.contextRegions.empty()) {
+      output << '\n';
+      return;
+    }
+    output << " {\n";
+    for (const auto &region : value.contextRegions) {
+      output << "      graphir.context_region context(#ctx"
+             << module.contextOrdinal(region.context) << ')';
+      references(region.stages);
+      location(region.location);
+      output << '\n';
+    }
+    output << "    }\n";
   };
   for (const auto &definition : module.compositionDefinitions()) {
     output << "\n  graphir." << definitionKindName(definition.kind) << " @\"" << escaped(definition.name) << '"';

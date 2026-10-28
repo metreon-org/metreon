@@ -22,6 +22,11 @@ add_library(metreon_frontend
     lib/GraphIR/Graph.cpp
     lib/GraphIR/Composition.cpp
     lib/GraphIR/Lowering.cpp
+    lib/GraphIR/Passes.cpp
+    lib/GraphIR/Passes/DeadTransitionElimination.cpp
+    lib/GraphIR/Passes/StateChainCollapse.cpp
+    lib/GraphIR/Passes/ContextHoisting.cpp
+    lib/GraphIR/Passes/FusionLegality.cpp
     lib/Lexer/Lexer.cpp
     lib/Parser/Parser.cpp
     lib/Parser/CompositionParser.cpp
@@ -44,6 +49,17 @@ metreon_enable_warnings(metreonc)
 include(CTest)
 
 if(BUILD_TESTING)
+    add_executable(metreon_optimization_tests tests/OptimizationTests.cpp)
+    target_link_libraries(metreon_optimization_tests PRIVATE metreon_frontend)
+    metreon_enable_warnings(metreon_optimization_tests)
+    add_test(NAME metreon.graphir.optimizations COMMAND metreon_optimization_tests)
+    add_test(NAME metreon.graphir.optimizations.cli
+        COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:metreonc>
+            -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/examples/optimizations.mtr
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/cli-tests/optimizations
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/OptimizationCliTests.cmake)
+
     add_executable(metreon_composition_tests tests/CompositionTests.cpp)
     target_link_libraries(metreon_composition_tests PRIVATE metreon_frontend)
     metreon_enable_warnings(metreon_composition_tests)

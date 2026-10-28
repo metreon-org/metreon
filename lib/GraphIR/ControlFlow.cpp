@@ -49,6 +49,10 @@ private:
         throw std::logic_error("GraphIR operation follows a callable return");
       }
       switch (operation.kind) {
+      case CallableOperationKind::ContextRegion:
+        // Evidence regions are transparent to SSA and lexical ownership scopes.
+        current = appendBody(operation.body, *current, scopes);
+        break;
       case CallableOperationKind::Block: {
         auto nestedScopes = scopes;
         nestedScopes.push_back(operation.id);

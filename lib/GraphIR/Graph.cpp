@@ -2,6 +2,7 @@
 #include "metreon/GraphIR/ControlFlow.h"
 #include "metreon/GraphIR/Composition.h"
 
+#include <algorithm>
 #include <atomic>
 #include <functional>
 #include <sstream>
@@ -199,7 +200,7 @@ Module &Module::operator=(Module &&other) noexcept {
 ResourceNodeId ResourceGraph::addState(
     std::string name, std::map<std::string, std::string> attributes,
     SourceLocation location) {
-  const ResourceNodeId id = states_.size();
+  const ResourceNodeId id = nextState_++;
   states_.push_back(ResourceStateNode{id, std::move(name),
                                       std::move(attributes), location});
   return id;
@@ -231,12 +232,25 @@ CallableOperation CallableGraph::makeOperation(CallableOperationKind kind,
 void ResourceGraph::addTransition(
     ResourceNodeId source, ResourceNodeId target,
     std::map<std::string, std::string> attributes, SourceLocation location) {
-  if (source >= states_.size() || target >= states_.size()) {
+  const auto exists = [&](ResourceNodeId id) {
+    return std::any_of(states_.begin(), states_.end(),
+                       [&](const auto &state) { return state.id == id; });
+  };
+  if (!exists(source) || !exists(target)) {
     throw std::logic_error(
         "GraphIR resource transition refers to an unknown state node");
   }
   transitions_.push_back(ResourceTransitionEdge{
       source, target, std::move(attributes), location});
+}
+
+void ResourceGraph::addEntryState(ResourceNodeId state) {
+  if (std::none_of(states_.begin(), states_.end(),
+                   [&](const auto &node) { return node.id == state; })) {
+    throw std::logic_error("GraphIR resource entry refers to an unknown state");
+  }
+  if (std::find(entryStates_.begin(), entryStates_.end(), state) == entryStates_.end())
+    entryStates_.push_back(state);
 }
 
 ContextTemplateSpecialization &
@@ -277,6 +291,11 @@ void Module::requireContextUse(const ContextMetadataRef &context,
     throw std::logic_error("GraphIR context key forbids " +
                            std::string(contextUseName(use)));
   }
+}
+
+std::size_t Module::contextOrdinal(const ContextMetadataRef &context) const {
+  requireContextUse(context, ContextUse::MetadataAttachment);
+  return context->key_.ordinal_;
 }
 
 NodeId Module::addNode(NodeKind kind, std::string name,
@@ -454,10 +473,11 @@ std::string Module::print() const {
         for (const auto &operation : body) {
           output << std::string(indent, ' ');
           const bool isBlock = operation.kind == CallableOperationKind::Block;
+          const bool isContextRegion = operation.kind == CallableOperationKind::ContextRegion;
           const bool isReturn = operation.kind == CallableOperationKind::Return;
           const auto type = operation.attributes.find("type");
           const bool isVoid = type != operation.attributes.end() && type->second == "void";
-          if (!isBlock && !isReturn && !isVoid) {
+          if (!isBlock && !isContextRegion && !isReturn && !isVoid) {
             output << valuePrefix << operation.id << " = ";
           }
           const char *operationName = "";
@@ -467,6 +487,7 @@ std::string Module::print() const {
           case CallableOperationKind::Call: operationName = "call"; break;
           case CallableOperationKind::Block: operationName = "block"; break;
           case CallableOperationKind::Return: operationName = "return"; break;
+          case CallableOperationKind::ContextRegion: operationName = "context_region"; break;
           }
           output << "graphir." << operationName;
           if (!operation.name.empty()) {
@@ -490,7 +511,7 @@ std::string Module::print() const {
           output << " id(#" << prefix << index << "op" << operation.id << ')';
           printContext(operation.context);
           printLocation(operation.location);
-          if (isBlock) {
+          if (isBlock || isContextRegion) {
             output << " {\n";
             printBody(operation.body, indent + 2);
             output << std::string(indent, ' ') << "}\n";
@@ -533,7 +554,27 @@ std::string Module::print() const {
              << escapeString(state.name) << '\"';
       printAttributes(output, state.attributes);
       output << " loc(\"" << escapeString(sourceName_) << "\":"
-             << state.location.line << ':' << state.location.column << ")\n";
+             << state.location.line << ':' << state.location.column << ')';
+      if (state.members.empty()) {
+        output << '\n';
+        continue;
+      }
+      output << " {\n";
+      for (const auto &member : state.members) {
+        output << "      graphir.state_member %s" << member.id << " \""
+               << escapeString(member.name) << '\"';
+        printAttributes(output, member.attributes);
+        printLocation(member.location);
+        output << '\n';
+      }
+      for (const auto &transition : state.internalTransitions) {
+        output << "      graphir.internal_transition %s" << transition.source
+               << " -> %s" << transition.target;
+        printAttributes(output, transition.attributes);
+        printLocation(transition.location);
+        output << '\n';
+      }
+      output << "    }\n";
     }
 
     if (!resource.states().empty() && !resource.transitions().empty()) {

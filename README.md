@@ -31,6 +31,56 @@ output filename. Source validation finishes before opening the output file, so
 invalid programs do not replace a previous artifact. Directory or file-write
 failures produce an error and a nonzero exit status.
 
+GraphIR optimization runs by default, including when `--emit` is omitted.
+`--emit graphir` is equivalent to `--emit=graphir`. To emit the original lowered
+graph and skip all four passes, including fusion verification, use:
+
+```sh
+./build/metreonc --emit graphir --no-optimization examples/optimizations.mtr
+```
+
+Without `--no-optimization`, that example removes an unreachable protocol state,
+collapses the resource chain, and groups common context evidence in callable
+bodies and the fused worker. Both modes still perform frontend validation, and
+pass failures preserve any previous output file.
+
+## GraphIR passes
+
+The independent pass APIs are in `metreon/GraphIR/Passes.h`, under
+`metreon::graphir::passes`. `lowerModule` produces unoptimized GraphIR for library
+callers; `runDefaultPipeline(module)` applies the same pipeline as the CLI:
+
+1. `FusionLegalityPass` checks nominal context compatibility, topology and
+   stage-call dependencies, and dependency order within each `fuse` list. It
+   rejects existing cycles and cycles introduced by contracting fused workers,
+   including a fusion of `A` and `C` around an unfused `B` in `A -> B -> C`.
+2. `DeadTransitionEliminationPass` removes unreachable resource states and edges
+   and unreachable protocol states/messages. Resource roots include the first
+   declared state, as required by existing source validation, and additional
+   typed state references. Protocol roots include channel initial states and
+   typed endpoint states across all pipelines. Graphs without known entries are
+   retained. Context-template checks and definition/member references are
+   updated with removals. Source validation continues to reject unreachable
+   resource declarations; the pass also supports graphs changed after lowering.
+3. `StateChainCollapsePass` collapses resource links with a single successor and
+   a single predecessor into one node. Cycles and independently referenced entry
+   states remain boundaries. `graphir.state_member` records retain each original
+   state's ID, fields, accumulator metadata, and source location. Ordered
+   `graphir.internal_transition` records retain all transition contracts,
+   including waits, effects, parameters, and ownership types. Collapsing a graph
+   never authorizes skipping those transitions or entering at the wrong member.
+4. `ContextHoistingPass` groups consecutive uses of the same nominal evidence in
+   `graphir.context_region` operations. Scalar setup between calls keeps its
+   execution order; lexical blocks, returns, other contexts, and context-free
+   calls are boundaries. These regions supply inherited evidence and introduce
+   neither runtime values nor lexical ownership scopes. Fused workers also
+   record common-context stage groups by reference, without invoking stages
+   again. Existing call order, value IDs, effects, and CFGs are preserved.
+
+Passes may also be run individually with `PassName{}.run(module)`. Fusion checks
+cover the current structural GraphIR model; GPU execution, target resource
+limits, barrier participation, and general runtime scheduling remain future work.
+
 The current compiler parses and validates `.mtr` context declarations and
 resource state machines, kernels, and procedures, then emits textual GraphIR
 with context metadata, resource graphs, and ordered callable bodies. Procedures
