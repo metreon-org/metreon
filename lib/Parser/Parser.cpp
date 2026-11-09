@@ -81,11 +81,24 @@ ast::Statement Parser::parseBlock() {
 }
 
 ast::Statement Parser::parseStatement() {
+  if (current_.kind == lexer::TokenKind::KeywordIf) return parseIf();
+  if (current_.kind == lexer::TokenKind::KeywordLoop ||
+      current_.kind == lexer::TokenKind::KeywordFor ||
+      current_.kind == lexer::TokenKind::KeywordWhile ||
+      current_.kind == lexer::TokenKind::KeywordUntil) return parseLoop();
   if (current_.kind == lexer::TokenKind::LeftBrace) {
     return parseBlock();
   }
   ast::Statement statement;
   statement.location = current_.location;
+  if (current_.kind == lexer::TokenKind::KeywordBreak ||
+      current_.kind == lexer::TokenKind::KeywordContinue) {
+    statement.kind = current_.kind == lexer::TokenKind::KeywordBreak
+        ? ast::StatementKind::Break : ast::StatementKind::Continue;
+    advance();
+    expect(lexer::TokenKind::Semicolon, "`;` after loop control");
+    return statement;
+  }
   if (consume(lexer::TokenKind::KeywordReturn)) {
     statement.kind = ast::StatementKind::Return;
     if (current_.kind != lexer::TokenKind::Semicolon) {
@@ -102,6 +115,13 @@ ast::Statement Parser::parseStatement() {
   type.ownership = isOwned ? ast::OwnershipQualifier::Own
                            : ast::OwnershipQualifier::None;
   ast::QualifiedName name = parseQualifiedName();
+  if (!isConstant && !isOwned && consume(lexer::TokenKind::Equal)) {
+    statement.kind = ast::StatementKind::Assignment;
+    statement.variable.name = name.str();
+    statement.expression = parseExpression();
+    expect(lexer::TokenKind::Semicolon, "`;` after assignment");
+    return statement;
+  }
   if (!isConstant && !isOwned && current_.kind == lexer::TokenKind::LeftParen) {
     statement.kind = ast::StatementKind::Call;
     statement.expression = parseNamedExpression(std::move(name));
@@ -130,7 +150,129 @@ ast::VariableDeclaration Parser::parseVariableDeclaration(ast::ValueType type,
   return declaration;
 }
 
-ast::Expression Parser::parseExpression() {
+ast::Statement Parser::parseIf() {
+  ast::Statement statement;
+  statement.kind = ast::StatementKind::If;
+  statement.location = expect(lexer::TokenKind::KeywordIf, "if").location;
+  expect(lexer::TokenKind::LeftParen, "`(` before an if condition");
+  statement.expression = parseExpression();
+  expect(lexer::TokenKind::RightParen, "`)` after an if condition");
+  statement.statements.push_back(parseBlock());
+  if (consume(lexer::TokenKind::KeywordElse)) {
+    statement.alternative.push_back(current_.kind == lexer::TokenKind::KeywordIf
+        ? parseIf() : parseBlock());
+  }
+  return statement;
+}
+
+ast::QualifiedName Parser::parseLoopContext(bool plain) {
+  expect(plain ? lexer::TokenKind::LeftParen : lexer::TokenKind::Less,
+         plain ? "`(` before loop context" : "`<` before loop context");
+  expect(lexer::TokenKind::At, "`@cx` before loop context");
+  auto name = expect(lexer::TokenKind::Identifier, "cx");
+  if (name.text != "cx") fail("parse.loop_context_parameter", "loop context annotation must use @cx");
+  expect(lexer::TokenKind::Colon, "`:` after @cx");
+  auto context = parseQualifiedName();
+  expect(plain ? lexer::TokenKind::RightParen : lexer::TokenKind::Greater,
+         plain ? "`)` after loop context" : "`>` after loop context");
+  return context;
+}
+
+ast::Statement Parser::parseLoop() {
+  ast::Statement statement;
+  statement.location = current_.location;
+  const auto token = current_.kind;
+  advance();
+  statement.kind = token == lexer::TokenKind::KeywordLoop ? ast::StatementKind::Loop
+      : token == lexer::TokenKind::KeywordFor ? ast::StatementKind::For
+      : token == lexer::TokenKind::KeywordWhile ? ast::StatementKind::While : ast::StatementKind::Until;
+  statement.loopContext = parseLoopContext(statement.kind == ast::StatementKind::Loop);
+  if (statement.kind == ast::StatementKind::For) {
+    expect(lexer::TokenKind::LeftParen, "`(` before iteration variable");
+    statement.variable.type = parseValueType();
+    auto name = expect(lexer::TokenKind::Identifier, "iteration variable name");
+    statement.variable.name = name.text;
+    statement.variable.location = name.location;
+    expect(lexer::TokenKind::RightParen, "`)` after iteration variable");
+    expectWord("in");
+    statement.expression = parseExpression();
+  } else if (statement.kind != ast::StatementKind::Loop) {
+    expect(lexer::TokenKind::LeftParen, "`(` before loop condition");
+    statement.expression = parseExpression();
+    if (statement.kind == ast::StatementKind::Until) {
+      expect(lexer::TokenKind::KeywordIs, "`is true` or `is false` after until condition");
+      statement.stopValue = expect(lexer::TokenKind::BooleanLiteral, "Boolean stop value").text == "true";
+    }
+    expect(lexer::TokenKind::RightParen, "`)` after loop condition");
+  }
+  statement.statements.push_back(parseBlock());
+  return statement;
+}
+
+namespace {
+int precedence(lexer::TokenKind token) {
+  using K = lexer::TokenKind;
+  switch (token) {
+  case K::DotDot: return 1;
+  case K::OrOr: return 2;
+  case K::AndAnd: return 3;
+  case K::EqualEqual: case K::BangEqual: return 4;
+  case K::Less: case K::Greater: case K::LessEqual: case K::GreaterEqual: return 5;
+  case K::Plus: case K::Minus: return 6;
+  case K::Star: case K::Slash: case K::Percent: return 7;
+  default: return -1;
+  }
+}
+} // namespace
+
+ast::Expression Parser::parseExpression() { return parseBinary(0); }
+
+ast::Expression Parser::parseBinary(int minimumPrecedence) {
+  auto left = parseUnary();
+  while (precedence(current_.kind) >= minimumPrecedence) {
+    auto token = current_;
+    advance();
+    ast::Expression expression;
+    expression.kind = token.kind == lexer::TokenKind::DotDot ? ast::ExpressionKind::Range : ast::ExpressionKind::Binary;
+    expression.location = token.location;
+    expression.op = token.text;
+    expression.arguments.push_back(std::move(left));
+    expression.arguments.push_back(parseBinary(precedence(token.kind) + 1));
+    left = std::move(expression);
+  }
+  return left;
+}
+
+ast::Expression Parser::parseUnary() {
+  if (current_.kind != lexer::TokenKind::Bang && current_.kind != lexer::TokenKind::Minus &&
+      current_.kind != lexer::TokenKind::Plus) return parsePrimary();
+  auto token = current_;
+  advance();
+  auto operand = parseUnary();
+  if (token.kind == lexer::TokenKind::Minus && operand.kind == ast::ExpressionKind::Literal &&
+      operand.literal.kind == ast::LiteralKind::Boolean)
+    fail("parse.invalid_signed_literal", "a Boolean literal cannot have a minus sign");
+  if (token.kind == lexer::TokenKind::Minus && operand.kind == ast::ExpressionKind::Literal &&
+      operand.literal.kind != ast::LiteralKind::Boolean) {
+    auto &value = operand.literal.value;
+    value = value.starts_with('-') ? value.substr(1) : "-" + value;
+    operand.location = operand.literal.location = token.location;
+    return operand;
+  }
+  ast::Expression expression;
+  expression.kind = ast::ExpressionKind::Unary;
+  expression.location = token.location;
+  expression.op = token.text;
+  expression.arguments.push_back(std::move(operand));
+  return expression;
+}
+
+ast::Expression Parser::parsePrimary() {
+  if (consume(lexer::TokenKind::LeftParen)) {
+    auto expression = parseExpression();
+    expect(lexer::TokenKind::RightParen, "`)` after expression");
+    return expression;
+  }
   ast::Expression expression;
   expression.location = current_.location;
   if (consume(lexer::TokenKind::At)) {
@@ -226,10 +368,13 @@ ast::ContextDeclaration Parser::parseContextDeclaration() {
     parseContextGenerics(declaration);
   }
 
-  expect(lexer::TokenKind::KeywordGrants, "`grants`");
-  expect(lexer::TokenKind::LeftBrace, "`{` before the grant list");
-  declaration.grants = parseGrantList();
-  expect(lexer::TokenKind::RightBrace, "`}` after the grant list");
+  if (consume(lexer::TokenKind::KeywordGrants)) {
+    expect(lexer::TokenKind::LeftBrace, "`{` before the grant list");
+    declaration.grants = parseGrantList();
+    expect(lexer::TokenKind::RightBrace, "`}` after the grant list");
+  } else if (declaration.name.components.back() != "Loop") {
+    fail("parse.unexpected_token", "only loop contexts can omit the grants clause");
+  }
   if (current_.kind != lexer::TokenKind::Identifier) {
     fail("parse.expected_context_identifier",
          "expected a unique context identifier after the grant list");

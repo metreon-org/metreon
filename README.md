@@ -44,7 +44,112 @@ collapses the resource chain, and groups common context evidence in callable
 bodies and the fused worker. Both modes still perform frontend validation, and
 pass failures preserve any previous output file.
 
-## GraphIR passes
+## Inspect Metreon MLIR
+
+Enable MLIR with an LLVM/MLIR installation whose versions match:
+
+```sh
+cmake -S . -B build-mlir -DMETREON_ENABLE_MLIR=ON \
+  -DMLIR_DIR=/path/to/llvm/lib/cmake/mlir \
+  -DLLVM_DIR=/path/to/llvm/lib/cmake/llvm
+cmake --build build-mlir --parallel
+./build-mlir/metreonc --emit=mlir examples/procedures.mtr
+cat tmp/mlir/procedures.mlir
+./build-mlir/metreon-opt tmp/mlir/procedures.mlir -o /tmp/procedures.checked.mlir
+```
+
+The implementation is checked against LLVM/MLIR 18.1.3. `--emit mlir` also works;
+stdin produces `tmp/mlir/stdin.mlir`. Output follows the same working-directory
+and validation-before-replacement rules as GraphIR. GraphIR remains the default,
+and builds with MLIR disabled diagnose an explicit MLIR emission request.
+
+This route is `.mtr -> validated GraphIR -> default GraphIR passes -> registered
+Metreon semantic MLIR`. `--no-optimization` skips GraphIR passes; import verification
+still runs. Contexts/grants, resources and typestates, transition declarations,
+callable authority/effect/ownership contracts, protocols, and pipeline topology
+and schedules use `metreon` operations. Contexts have symbols and attributes,
+never runtime SSA values. Collapsed resource members and internal transitions are
+reconstructed; hoisted context evidence is resolved for each deferred call.
+
+This is a structural import stage. Ordinary expressions, local bindings, calls,
+returns, and CFGs remain in explicit `deferred_body`/`deferred_cfg` attributes
+for later direct conversion to standard MLIR dialects. They do not become custom
+`metreon.literal`, `metreon.variable`, loop, or branch operations. Builtin scalar
+types are reused; unresolved storage/layout/generic types remain structured
+`!metreon.unresolved` types. Resource states are intrinsically owned
+`!metreon.resource` types; other owned payloads use `!metreon.owned`.
+
+The module records `metreon.import_stage = "semantic_structure"` and
+`metreon.ordinary_lowering = "deferred"`. Verification checks the registered
+schemas, symbol references, context identity, transition signatures, and imported
+value/scope consistency. It does not establish complete lifecycle/async ownership
+verification or executable host/GPU code. Transition signatures remain
+declarations without fabricated implementations. No FPGA/CIRCT backend is added.
+
+## Loops and conditionals
+
+The frontend accepts `if`/`else if`/`else`, `loop`, `for`, `while`, `until`,
+`break`, and `continue`. See [loops_and_conditionals.mtr](examples/loops_and_conditionals.mtr)
+for complete host and GPU examples:
+
+```metreon
+context Host::Loop repeat_ctx;
+
+procedure count() -> i32 {
+    i32 value = 0;
+    until<@cx: repeat_ctx> (value == 4 is true) {
+        value = value + 1;
+    }
+    if (value == 4) {
+        return value;
+    } else {
+        return 0;
+    }
+}
+```
+
+Loop contexts have no grants and cannot serve as callable execution authority.
+Use `Host::Loop` for host callables and `Gpu::Loop` for GPU callables; a
+context-independent procedure defaults to the host domain for this check.
+The existing grants syntax with an empty set is also accepted for loop contexts.
+
+`until` checks its condition before each iteration and stops when it equals the
+explicit `is true` or `is false` value. `while` also checks before each iteration.
+Plain `loop (@cx: repeat_ctx)` repeats until an exit. `break` exits the nearest
+loop; `continue` rechecks its predicate, or executes a `for` step before testing
+the next element. A nested `return` always exits the callable.
+
+`for<@cx: repeat_ctx> (i32 item) in 0..4` visits a half-open integer range;
+both bounds are evaluated once. Equal or descending bounds produce no iterations.
+Container iteration supports `view<Element, AddressSpace>` with a matching,
+read-only iteration variable. View extent/layout and iterator realization remain
+deferred to later primary-dialect lowering.
+
+Expressions support parentheses, unary `!`/`+`/`-`, arithmetic `+ - * / %`,
+comparisons `== != < <= > >=`, and short-circuit `&&`/`||` with conventional
+precedence. Assignment supports mutable, unowned scalar locals and parameters.
+Conditions require `bool`. Initialization is checked on every continuing path;
+owned values cannot be consumed again through a loop backedge.
+
+```sh
+./build/metreonc --emit=graphir examples/loops_and_conditionals.mtr
+cat tmp/graphir/loops_and_conditionals.graphir
+```
+
+Control-flow bodies are organized within the existing `graphir.cfg` section:
+basic blocks contain the computations, `graphir.cfg.cond_br` records both edges,
+and ordinary branches record joins, backedges, breaks, and continues. Loop block
+metadata identifies its role and nominal loop context. Mutable locals use explicit
+local reads/writes, so a predicate observes the current value on every iteration.
+There is no separate loop or conditional section. Existing straight-line dumps
+retain their earlier representation for compatibility.
+
+The optional MLIR importer preserves the new operation trees and CFG edges as
+deferred body metadata. It does not create Metreon arithmetic, loop, or branch
+operations. This frontend/GraphIR support does not establish native/GPU execution
+or hardware clock timing.
+
+## GraphIR pass APIs
 
 The independent pass APIs are in `metreon/GraphIR/Passes.h`, under
 `metreon::graphir::passes`. `lowerModule` produces unoptimized GraphIR for library

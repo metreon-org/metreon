@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -255,6 +256,12 @@ public:
       : graph_(graph), analysis_(analysis), contexts_(contexts) {}
 
   void lower(const ast::CallableDeclaration &callable, bool isKernel) {
+    std::function<void(const ast::Statement &)> assignments = [&](const auto &statement) {
+      if (statement.kind == ast::StatementKind::Assignment) assigned_.insert(statement.variable.name);
+      for (const auto &nested : statement.statements) assignments(nested);
+      for (const auto &nested : statement.alternative) assignments(nested);
+    };
+    assignments(callable.body);
     const auto *context = analysis_.contexts.at(&callable);
     const auto metadata = context ? contexts_.at(context->identifier) : ContextMetadataRef{};
     graph_.setSignature({{"return_type", callable.resultType.str()},
@@ -265,18 +272,58 @@ public:
                                                       : isKernel ? "Gpu" : "context_independent"}},
                         metadata);
     scopes_.emplace_back();
+    std::vector<CallableOperation> prefix;
     for (const auto &parameter : callable.parameters) {
       auto id = graph_.addParameter(parameter.name, parameter.type.str(),
                                     parameter.isContextEvidence ? metadata : ContextMetadataRef{},
                                     parameter.location);
       if (id) {
-        scopes_.back().emplace(parameter.name, *id);
+        const bool slot = mutableLocal(parameter.name, parameter.type);
+        auto binding = *id;
+        if (slot) {
+          auto local = localOperation(parameter.name, parameter.type.str(), parameter.location, true);
+          local.operands = {*id};
+          binding = local.id;
+          prefix.push_back(std::move(local));
+        }
+        scopes_.back().emplace(parameter.name, Binding{binding, slot});
       }
     }
-    graph_.setBody(lowerBlock(callable.body, false));
+    auto body = lowerBlock(callable.body, false);
+    prefix.insert(prefix.end(), std::make_move_iterator(body.begin()), std::make_move_iterator(body.end()));
+    graph_.setBody(std::move(prefix));
   }
 
 private:
+  struct Binding { CallableValueId id; bool slot; };
+  bool mutableLocal(const std::string &name, const ast::ValueType &type) const {
+    return assigned_.contains(name) && type.ownership == ast::OwnershipQualifier::None &&
+        type.reference.arguments.empty();
+  }
+  Binding binding(const std::string &name) const {
+    for (auto scope = scopes_.rbegin(); scope != scopes_.rend(); ++scope)
+      if (const auto found = scope->find(name); found != scope->end()) return found->second;
+    throw std::logic_error("validated local is missing during lowering");
+  }
+  CallableOperation localOperation(const std::string &name, const std::string &type,
+                                   SourceLocation location, bool slot) {
+    auto op = graph_.makeOperation(CallableOperationKind::Variable, name, location);
+    op.attributes = {{"type", type}, {"initialized", "true"},
+        {"mutability", "mutable"}, {"storage", "automatic"}};
+    if (slot) op.attributes.emplace("mutable_local", "true");
+    return op;
+  }
+  CallableValueId emit(CallableOperationKind kind, const std::string &type,
+      std::vector<CallableValueId> operands, std::vector<CallableOperation> &body,
+      SourceLocation location, const std::string &operation = {}) {
+    auto op = graph_.makeOperation(kind, "", location);
+    op.attributes.emplace("type", type);
+    if (!operation.empty()) op.attributes.emplace("operator", operation);
+    op.operands = std::move(operands);
+    const auto id = op.id;
+    body.push_back(std::move(op));
+    return id;
+  }
   std::optional<CallableValueId> lowerExpression(
       const ast::Expression &expression, std::vector<CallableOperation> &body) {
     const auto &info = analysis_.expressions.at(&expression);
@@ -284,13 +331,23 @@ private:
       return std::nullopt;
     }
     if (expression.kind == ast::ExpressionKind::Reference) {
-      for (auto scope = scopes_.rbegin(); scope != scopes_.rend(); ++scope) {
-        const auto found = scope->find(expression.name.str());
-        if (found != scope->end()) {
-          return found->second;
-        }
-      }
-      throw std::logic_error("validated local is missing during lowering");
+      auto local = binding(expression.name.str());
+      return local.slot ? emit(CallableOperationKind::Load, info.type.str(), {local.id}, body, expression.location) : local.id;
+    }
+    if (expression.kind == ast::ExpressionKind::Binary && (expression.op == "&&" || expression.op == "||")) {
+      auto result = localOperation("$logical", "bool", expression.location, true);
+      result.attributes.emplace("initializer.kind", "boolean");
+      result.attributes.emplace("initializer.value", expression.op == "||" ? "true" : "false");
+      const auto slot = result.id;
+      body.push_back(std::move(result));
+      auto control = graph_.makeOperation(CallableOperationKind::If, "", expression.location);
+      control.attributes.emplace("origin", "short_circuit");
+      control.operands = {lowerExpression(expression.arguments[0], control.condition).value()};
+      auto &rhs = expression.op == "&&" ? control.body : control.alternative;
+      auto value = lowerExpression(expression.arguments[1], rhs).value();
+      emit(CallableOperationKind::Assign, "void", {slot, value}, rhs, expression.location);
+      body.push_back(std::move(control));
+      return emit(CallableOperationKind::Load, "bool", {slot}, body, expression.location);
     }
     std::vector<CallableValueId> operands;
     for (const auto &argument : expression.arguments) {
@@ -300,8 +357,10 @@ private:
       }
     }
     const bool isCall = expression.kind == ast::ExpressionKind::Call;
+    const bool arithmetic = expression.kind == ast::ExpressionKind::Binary || expression.kind == ast::ExpressionKind::Unary;
     auto operation = graph_.makeOperation(isCall ? CallableOperationKind::Call
-                                                 : CallableOperationKind::Literal,
+        : expression.kind == ast::ExpressionKind::Binary ? CallableOperationKind::Binary
+        : expression.kind == ast::ExpressionKind::Unary ? CallableOperationKind::Unary : CallableOperationKind::Literal,
                                           isCall ? (info.calleeName.empty() ? expression.name.str() : info.calleeName) : "",
                                           expression.location);
     operation.attributes.emplace("type", info.type.str());
@@ -313,6 +372,8 @@ private:
       if (info.context) {
         operation.context = contexts_.at(info.context->identifier);
       }
+    } else if (arithmetic) {
+      operation.attributes.emplace("operator", expression.op);
     } else {
       operation.attributes.emplace("kind", literalKindName(expression.literal.kind));
       operation.attributes.emplace("value", expression.literal.value);
@@ -323,12 +384,92 @@ private:
                                                    : std::optional<CallableValueId>{id};
   }
 
+  CallableOperation nestedBlock(const ast::Statement &block) {
+    auto op = graph_.makeOperation(CallableOperationKind::Block, "", block.location);
+    op.body = lowerBlock(block, true);
+    return op;
+  }
+
+  CallableOperation control(const ast::Statement &statement) {
+    const bool isIf = statement.kind == ast::StatementKind::If;
+    auto kind = isIf ? CallableOperationKind::If : statement.kind == ast::StatementKind::Loop ? CallableOperationKind::Loop
+        : statement.kind == ast::StatementKind::For ? CallableOperationKind::For
+        : statement.kind == ast::StatementKind::While ? CallableOperationKind::While : CallableOperationKind::Until;
+    auto op = graph_.makeOperation(kind, "", statement.location);
+    if (!isIf) op.loopContext = contexts_.at(analysis_.loopContexts.at(&statement)->identifier);
+    if (kind == CallableOperationKind::Until) op.attributes.emplace("stop_value", statement.stopValue ? "true" : "false");
+    if (kind == CallableOperationKind::For) {
+      scopes_.emplace_back();
+      const auto type = statement.variable.type.str();
+      const auto &iterable = *statement.expression;
+      CallableValueId element;
+      if (iterable.kind == ast::ExpressionKind::Range) {
+        op.attributes.emplace("iteration_kind", "range");
+        auto begin = lowerExpression(iterable.arguments[0], op.initialization).value();
+        auto end = lowerExpression(iterable.arguments[1], op.initialization).value();
+        auto index = localOperation("$range_index", type, statement.location, true);
+        index.operands = {begin};
+        const auto slot = index.id;
+        op.initialization.push_back(std::move(index));
+        auto current = emit(CallableOperationKind::Load, type, {slot}, op.condition, statement.location);
+        op.operands = {emit(CallableOperationKind::Binary, "bool", {current, end}, op.condition, statement.location, "<")};
+        element = emit(CallableOperationKind::Load, type, {slot}, op.body, statement.location);
+        auto previous = emit(CallableOperationKind::Load, type, {slot}, op.step, statement.location);
+        auto one = graph_.makeOperation(CallableOperationKind::Literal, "", statement.location);
+        one.attributes = {{"type", type}, {"kind", "integer"}, {"value", "1"}};
+        const auto oneId = one.id;
+        op.step.push_back(std::move(one));
+        auto next = emit(CallableOperationKind::Binary, type, {previous, oneId}, op.step, statement.location, "+");
+        emit(CallableOperationKind::Assign, "void", {slot, next}, op.step, statement.location);
+      } else {
+        op.attributes.emplace("iteration_kind", "view");
+        auto container = lowerExpression(iterable, op.initialization).value();
+        auto iterator = emit(CallableOperationKind::IteratorInit, "iterator<" + type + ">", {container}, op.initialization, statement.location);
+        op.operands = {emit(CallableOperationKind::IteratorHasNext, "bool", {iterator}, op.condition, statement.location)};
+        element = emit(CallableOperationKind::IteratorValue, type, {iterator}, op.body, statement.location);
+        emit(CallableOperationKind::IteratorAdvance, "void", {iterator}, op.step, statement.location);
+      }
+      auto variable = localOperation(statement.variable.name, type, statement.location, false);
+      variable.attributes["mutability"] = "const";
+      variable.operands = {element};
+      scopes_.back().emplace(statement.variable.name, Binding{variable.id, false});
+      op.body.push_back(std::move(variable));
+    } else if (statement.expression) {
+      op.operands = {lowerExpression(*statement.expression, op.condition).value()};
+    }
+    op.body.push_back(nestedBlock(statement.statements.at(0)));
+    if (isIf && !statement.alternative.empty()) {
+      const auto &alternative = statement.alternative.front();
+      op.alternative.push_back(alternative.kind == ast::StatementKind::If ? control(alternative) : nestedBlock(alternative));
+    }
+    if (kind == CallableOperationKind::For) scopes_.pop_back();
+    return op;
+  }
+
   std::vector<CallableOperation> lowerBlock(const ast::Statement &block, bool nested) {
     if (nested) {
       scopes_.emplace_back();
     }
     std::vector<CallableOperation> body;
     for (const auto &statement : block.statements) {
+      if (statement.kind == ast::StatementKind::If || statement.kind == ast::StatementKind::Loop ||
+          statement.kind == ast::StatementKind::For || statement.kind == ast::StatementKind::While ||
+          statement.kind == ast::StatementKind::Until) {
+        body.push_back(control(statement));
+        continue;
+      }
+      if (statement.kind == ast::StatementKind::Break || statement.kind == ast::StatementKind::Continue) {
+        body.push_back(graph_.makeOperation(statement.kind == ast::StatementKind::Break
+            ? CallableOperationKind::Break : CallableOperationKind::Continue, "", statement.location));
+        continue;
+      }
+      if (statement.kind == ast::StatementKind::Assignment) {
+        auto value = lowerExpression(*statement.expression, body).value();
+        const auto target = binding(statement.variable.name);
+        if (!target.slot) throw std::logic_error("assignment requires a mutable local slot");
+        emit(CallableOperationKind::Assign, "void", {target.id, value}, body, statement.location);
+        continue;
+      }
       if (statement.kind == ast::StatementKind::Call) {
         lowerExpression(*statement.expression, body);
         continue;
@@ -365,7 +506,9 @@ private:
         operation.attributes.emplace("initializer.kind", literalKindName(variable.initializer->literal.kind));
         operation.attributes.emplace("initializer.value", variable.initializer->literal.value);
       }
-      scopes_.back().emplace(variable.name, operation.id);
+      const bool slot = !variable.isConstant && mutableLocal(variable.name, variable.type);
+      if (slot) operation.attributes.emplace("mutable_local", "true");
+      scopes_.back().emplace(variable.name, Binding{operation.id, slot});
       body.push_back(std::move(operation));
     }
     if (nested) {
@@ -377,7 +520,8 @@ private:
   CallableGraph &graph_;
   const sema::CallableAnalysis &analysis_;
   const ContextMap &contexts_;
-  std::vector<std::unordered_map<std::string, CallableValueId>> scopes_;
+  std::vector<std::unordered_map<std::string, Binding>> scopes_;
+  std::unordered_set<std::string> assigned_;
 };
 
 void lowerCallables(const ast::Module &sourceModule, Module &module,
@@ -572,6 +716,7 @@ void lowerEntryStates(const ast::Module &source, Module &module,
     }
     if (value.expression) expression(*value.expression);
     for (const auto &nested : value.statements) statement(nested);
+    for (const auto &nested : value.alternative) statement(nested);
   };
   const auto callable = [&](const ast::CallableDeclaration &value) {
     for (const auto &parameter : value.parameters) type(parameter.type.reference);

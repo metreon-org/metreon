@@ -15,6 +15,8 @@ public:
   ast::Module parseModule();
 
 private:
+  // Reuse the canonical type/signature grammar at the GraphIR import boundary.
+  friend class CanonicalSyntax;
   ast::ProtocolDeclaration parseProtocolDeclaration();
   ast::PipelineDeclaration parsePipelineDeclaration();
   std::vector<ast::CompositionProperty> parseCompositionProperties();
@@ -28,9 +30,15 @@ private:
   ast::CallableDeclaration parseCallableDeclaration(bool isKernel);
   ast::Statement parseBlock();
   ast::Statement parseStatement();
+  ast::Statement parseIf();
+  ast::Statement parseLoop();
+  ast::QualifiedName parseLoopContext(bool plain);
   ast::VariableDeclaration parseVariableDeclaration(ast::ValueType type,
                                                    bool isConstant);
   ast::Expression parseExpression();
+  ast::Expression parseBinary(int minimumPrecedence);
+  ast::Expression parseUnary();
+  ast::Expression parsePrimary();
   ast::Expression parseNamedExpression(ast::QualifiedName name);
   std::vector<ast::AllowsClause> parseAllowsClauses();
   ast::LiteralInitializer parseLiteralInitializer();

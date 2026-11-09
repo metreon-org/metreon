@@ -9,9 +9,10 @@ def Metreon_Dialect : Dialect {
   let summary = "Execution contexts and resource lifecycles for Metreon";
   let description = [{
     The Metreon dialect represents execution contexts, resources, states, and
-    transitions. This initial definition provides the dialect namespace; the
-    operation schemas and semantics will be defined separately.
+    transitions. Ordinary computation belongs to standard MLIR dialects;
+    structural import can retain its body explicitly for later conversion.
   }];
+  let useDefaultTypePrinterParser = 1;
 }
 
 #endif // METREON_DIALECT_TD

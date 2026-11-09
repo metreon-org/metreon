@@ -4,6 +4,7 @@
 
 #include <cctype>
 #include <string>
+#include <utility>
 
 namespace metreon::lexer {
 
@@ -61,6 +62,26 @@ const char *tokenKindName(TokenKind kind) {
     return "`allows`";
   case TokenKind::KeywordOwn:
     return "`own`";
+  case TokenKind::KeywordIf: return "`if`";
+  case TokenKind::KeywordElse: return "`else`";
+  case TokenKind::KeywordLoop: return "`loop`";
+  case TokenKind::KeywordFor: return "`for`";
+  case TokenKind::KeywordWhile: return "`while`";
+  case TokenKind::KeywordUntil: return "`until`";
+  case TokenKind::KeywordIn: return "`in`";
+  case TokenKind::KeywordIs: return "`is`";
+  case TokenKind::KeywordBreak: return "`break`";
+  case TokenKind::KeywordContinue: return "`continue`";
+  case TokenKind::Plus: return "`+`";
+  case TokenKind::Star: return "`*`";
+  case TokenKind::Slash: return "`/`";
+  case TokenKind::Percent: return "`%`";
+  case TokenKind::EqualEqual: return "`==`";
+  case TokenKind::BangEqual: return "`!=`";
+  case TokenKind::LessEqual: return "`<=`";
+  case TokenKind::GreaterEqual: return "`>=`";
+  case TokenKind::AndAnd: return "`&&`";
+  case TokenKind::OrOr: return "`||`";
   case TokenKind::ColonColon:
     return "`::`";
   case TokenKind::Colon:
@@ -214,6 +235,14 @@ Token Lexer::lexIdentifier() {
   } else if (text == "true" || text == "false") {
     kind = TokenKind::BooleanLiteral;
   }
+  static const std::pair<std::string_view, TokenKind> controlWords[] = {
+      {"if", TokenKind::KeywordIf}, {"else", TokenKind::KeywordElse},
+      {"loop", TokenKind::KeywordLoop}, {"for", TokenKind::KeywordFor},
+      {"while", TokenKind::KeywordWhile}, {"until", TokenKind::KeywordUntil},
+      {"is", TokenKind::KeywordIs},
+      {"break", TokenKind::KeywordBreak}, {"continue", TokenKind::KeywordContinue}};
+  for (const auto &[word, keyword] : controlWords)
+    if (text == word) kind = keyword;
   return Token{kind, std::move(text), start};
 }
 
@@ -285,8 +314,10 @@ Token Lexer::next() {
     }
     return punctuation(TokenKind::Colon);
   case '<':
+    if (peek() == '=') return punctuation(TokenKind::LessEqual, 2);
     return punctuation(TokenKind::Less);
   case '>':
+    if (peek() == '=') return punctuation(TokenKind::GreaterEqual, 2);
     return punctuation(TokenKind::Greater);
   case ',':
     return punctuation(TokenKind::Comma);
@@ -303,8 +334,10 @@ Token Lexer::next() {
   case '@':
     return punctuation(TokenKind::At);
   case '!':
+    if (peek() == '=') return punctuation(TokenKind::BangEqual, 2);
     return punctuation(TokenKind::Bang);
   case '=':
+    if (peek() == '=') return punctuation(TokenKind::EqualEqual, 2);
     if (peek() == '>') return punctuation(TokenKind::FatArrow, 2);
     return punctuation(TokenKind::Equal);
   case '.':
@@ -312,6 +345,12 @@ Token Lexer::next() {
     return punctuation(TokenKind::Dot);
   case '[': return punctuation(TokenKind::LeftBracket);
   case ']': return punctuation(TokenKind::RightBracket);
+  case '+': return punctuation(TokenKind::Plus);
+  case '*': return punctuation(TokenKind::Star);
+  case '/': return punctuation(TokenKind::Slash);
+  case '%': return punctuation(TokenKind::Percent);
+  case '&': if (peek() == '&') return punctuation(TokenKind::AndAnd, 2); break;
+  case '|': if (peek() == '|') return punctuation(TokenKind::OrOr, 2); break;
   case '-':
     if (peek() == '>') {
       return punctuation(TokenKind::Arrow, 2);

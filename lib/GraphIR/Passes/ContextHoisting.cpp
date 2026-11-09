@@ -9,8 +9,9 @@ namespace {
 
 void hoistBody(CallableGraph &callable, std::vector<CallableOperation> &body) {
   for (auto &operation : body)
-    if (operation.kind == CallableOperationKind::Block)
-      hoistBody(callable, operation.body);
+    for (auto *children : {&operation.initialization, &operation.condition,
+                          &operation.body, &operation.alternative, &operation.step})
+      hoistBody(callable, *children);
   std::vector<CallableOperation> result;
   for (std::size_t index = 0; index < body.size();) {
     const auto &first = body[index];

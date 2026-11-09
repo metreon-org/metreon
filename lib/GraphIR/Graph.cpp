@@ -11,6 +11,52 @@
 
 namespace metreon::graphir {
 
+const char *callableOperationKindName(CallableOperationKind kind) {
+  switch (kind) {
+  case CallableOperationKind::Literal: return "literal";
+  case CallableOperationKind::Variable: return "variable_decl";
+  case CallableOperationKind::Call: return "call";
+  case CallableOperationKind::Block: return "block";
+  case CallableOperationKind::Return: return "return";
+  case CallableOperationKind::ContextRegion: return "context_region";
+  case CallableOperationKind::Unary: return "unary";
+  case CallableOperationKind::Binary: return "binary";
+  case CallableOperationKind::Load: return "load";
+  case CallableOperationKind::Assign: return "assign";
+  case CallableOperationKind::If: return "if";
+  case CallableOperationKind::Loop: return "loop";
+  case CallableOperationKind::For: return "for";
+  case CallableOperationKind::While: return "while";
+  case CallableOperationKind::Until: return "until";
+  case CallableOperationKind::Break: return "break";
+  case CallableOperationKind::Continue: return "continue";
+  case CallableOperationKind::IteratorInit: return "iterator_init";
+  case CallableOperationKind::IteratorHasNext: return "iterator_has_next";
+  case CallableOperationKind::IteratorValue: return "iterator_value";
+  case CallableOperationKind::IteratorAdvance: return "iterator_advance";
+  }
+  throw std::logic_error("unknown callable operation kind");
+}
+
+void walkCallableOperations(const std::vector<CallableOperation> &body,
+    const std::function<void(const CallableOperation &)> &visit) {
+  for (const auto &op : body) {
+    visit(op);
+    for (const auto *children : {&op.initialization, &op.condition, &op.body, &op.alternative, &op.step})
+      walkCallableOperations(*children, visit);
+  }
+}
+
+bool hasStructuredControlFlow(const std::vector<CallableOperation> &body) {
+  bool result = false;
+  walkCallableOperations(body, [&](const auto &op) {
+    if (op.kind == CallableOperationKind::If || op.kind == CallableOperationKind::Loop ||
+        op.kind == CallableOperationKind::For || op.kind == CallableOperationKind::While ||
+        op.kind == CallableOperationKind::Until) result = true;
+  });
+  return result;
+}
+
 namespace {
 
 std::atomic<std::uint64_t> nextModuleIdentity{0};
@@ -480,15 +526,7 @@ std::string Module::print() const {
           if (!isBlock && !isContextRegion && !isReturn && !isVoid) {
             output << valuePrefix << operation.id << " = ";
           }
-          const char *operationName = "";
-          switch (operation.kind) {
-          case CallableOperationKind::Literal: operationName = "literal"; break;
-          case CallableOperationKind::Variable: operationName = "variable_decl"; break;
-          case CallableOperationKind::Call: operationName = "call"; break;
-          case CallableOperationKind::Block: operationName = "block"; break;
-          case CallableOperationKind::Return: operationName = "return"; break;
-          case CallableOperationKind::ContextRegion: operationName = "context_region"; break;
-          }
+          const char *operationName = callableOperationKindName(operation.kind);
           output << "graphir." << operationName;
           if (!operation.name.empty()) {
             output << " \"" << escapeString(operation.name) << '\"';
@@ -520,7 +558,9 @@ std::string Module::print() const {
           }
         }
       };
-      printBody(callable.body(), 4);
+      // Structured execution is printed exactly once, in the existing CFG.
+      // Retain the legacy straight-line rendering for existing consumers.
+      if (!hasStructuredControlFlow(callable.body())) printBody(callable.body(), 4);
       output << "  }\n";
     }
   };
@@ -668,6 +708,20 @@ std::string Module::print() const {
     for (std::size_t index = 0; index < callables.size(); ++index) {
       const auto &callable = callables[index];
       const auto cfg = buildControlFlow(callable);
+      const bool detailed = hasStructuredControlFlow(callable.body());
+      std::map<CallableValueId, const CallableOperation *> operations;
+      walkCallableOperations(callable.body(), [&](const auto &op) { operations.emplace(op.id, &op); });
+      std::map<CallableValueId, ContextMetadataRef> effectiveContexts;
+      std::function<void(const std::vector<CallableOperation> &, ContextMetadataRef)> contexts;
+      contexts = [&](const auto &body, ContextMetadataRef ambient) {
+        for (const auto &op : body) {
+          auto effective = op.context ? op.context : ambient;
+          effectiveContexts.emplace(op.id, effective);
+          for (const auto *children : {&op.initialization, &op.condition, &op.body, &op.alternative, &op.step})
+            contexts(*children, effective);
+        }
+      };
+      contexts(callable.body(), callable.context());
       const auto callablePrefix = prefix + std::to_string(index);
       const auto blockPrefix = "^" + callablePrefix + "bb";
       const auto operationPrefix = "#" + callablePrefix + "op";
@@ -699,15 +753,49 @@ std::string Module::print() const {
           output << operationPrefix << block.scopes[scope];
         }
         output << ')';
+        if (!block.attributes.empty()) printAttributes(output, block.attributes);
+        if (block.loopContext) {
+          requireContextUse(block.loopContext, ContextUse::MetadataAttachment);
+          output << " loop_context(#ctx" << contextOrdinal(block.loopContext) << ')';
+        }
         printLocation(block.location);
         output << " {\n";
         for (const auto operation : block.operations) {
-          output << "        graphir.cfg.op " << operationPrefix << operation << '\n';
+          output << "        graphir.cfg.op " << operationPrefix << operation;
+          if (detailed) {
+            const auto &op = *operations.at(operation);
+            output << ' ';
+            const auto type = op.attributes.find("type");
+            if (type != op.attributes.end() && type->second != "void") output << valuePrefix << op.id << " = ";
+            output << callableOperationKindName(op.kind);
+            if (!op.name.empty()) output << " \"" << escapeString(op.name) << '"';
+            if (!op.operands.empty()) {
+              output << " operands(";
+              for (std::size_t arg = 0; arg < op.operands.size(); ++arg) {
+                if (arg) output << ", ";
+                output << valuePrefix << op.operands[arg];
+              }
+              output << ')';
+            }
+            printAttributes(output, op.attributes);
+            printContext(effectiveContexts.at(op.id));
+            printLocation(op.location);
+          }
+          output << '\n';
         }
         const auto &terminator = block.terminator;
         if (terminator.kind == ControlFlowTerminatorKind::Branch) {
           output << "        graphir.cfg.br " << blockPrefix
                  << terminator.successor.value();
+          if (!terminator.control.empty()) {
+            printAttributes(output, {{"control", terminator.control}});
+            if (terminator.operation) output << " id(" << operationPrefix << *terminator.operation << ')';
+          }
+        } else if (terminator.kind == ControlFlowTerminatorKind::ConditionalBranch) {
+          output << "        graphir.cfg.cond_br " << valuePrefix << terminator.operands.at(0)
+                 << " true(" << blockPrefix << terminator.successor.value() << ") false("
+                 << blockPrefix << terminator.falseSuccessor.value() << ')';
+          if (terminator.operation) output << " id(" << operationPrefix << *terminator.operation << ')';
         } else {
           output << "        graphir.cfg.return";
           if (terminator.operation) {

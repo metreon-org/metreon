@@ -75,6 +75,9 @@ void validateContexts(const ast::Module &module) {
 
   for (const ast::ContextDeclaration &context : module.contexts) {
     const std::string contextName = context.typeName();
+    if (!context.name.components.empty() && context.name.components.back() == "Loop" &&
+        !context.grants.empty())
+      throw DiagnosticError({"sema.loop_context_grants", "loop contexts cannot declare grants", context.location});
     if (!contextIdentifiers.insert(context.identifier).second) {
       throw DiagnosticError(
           {"sema.duplicate_context_identifier",

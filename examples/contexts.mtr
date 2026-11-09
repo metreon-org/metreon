@@ -42,3 +42,18 @@ context Transport::TxQueue<N: Nic, Q: Queue> grants {
     net_completion,
     transport_cancel
 } transport_ctx;
+
+// Clocked FPGA stream authority; the clock and port are compile-time metadata.
+context Fpga::DataflowStage<fpga::clk0> grants {
+    fifo_reserve<port::Output>,
+    stream_enqueue<port::Output>,
+    clock_wait<fpga::clk0>
+} writer_ctx;
+
+// TPU execution authority; grant arguments retain spaces, completion and scope.
+context Tpu::TensorCore grants {
+    dma_copy<tpu::hbm, tpu::vmem>,
+    await_completion<tpu::LocalDma>,
+    tensor_compute<bf16>,
+    semaphore_signal<tpu::core>
+} tpu_core;

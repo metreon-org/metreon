@@ -3,5 +3,6 @@
 
 include "src/ContextOps.td"
 include "src/ResourceOps.td"
+include "src/StructureOps.td"
 
 #endif // METREON_OPS_TD

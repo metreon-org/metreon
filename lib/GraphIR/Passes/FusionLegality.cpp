@@ -60,7 +60,9 @@ void verifyPipeline(const Module &module, const PipelineGraph &pipeline) {
             fail("fusion_unknown_dependency", "fused stage calls a stage outside its pipeline", operation.location);
           dependencies.at(callee->second).insert(caller);
         }
-        calls(operation.body);
+        for (const auto *children : {&operation.initialization, &operation.condition,
+                                    &operation.body, &operation.alternative, &operation.step})
+          calls(*children);
       }
     };
     calls(module.stageGraphs().at(caller).body());

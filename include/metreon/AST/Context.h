@@ -120,13 +120,14 @@ struct LiteralInitializer {
   SourceLocation location;
 };
 
-enum class ExpressionKind { Literal, Reference, ContextReference, Call };
+enum class ExpressionKind { Literal, Reference, ContextReference, Call, Unary, Binary, Range };
 
 struct Expression {
   ExpressionKind kind = ExpressionKind::Literal;
   LiteralInitializer literal;
   QualifiedName name;
   std::vector<Expression> arguments;
+  std::string op;
   SourceLocation location;
 };
 
@@ -138,13 +139,17 @@ struct VariableDeclaration {
   SourceLocation location;
 };
 
-enum class StatementKind { Variable, Call, Block, Return };
+enum class StatementKind { Variable, Call, Block, Return, Assignment, If,
+                           Loop, For, While, Until, Break, Continue };
 
 struct Statement {
   StatementKind kind = StatementKind::Block;
   VariableDeclaration variable;
   std::optional<Expression> expression;
   std::vector<Statement> statements;
+  std::vector<Statement> alternative;
+  QualifiedName loopContext;
+  bool stopValue = true;
   SourceLocation location;
 };
 

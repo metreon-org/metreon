@@ -22,6 +22,7 @@ struct CallableAnalysis {
   std::unordered_map<const ast::CallableDeclaration *,
                      const ast::ContextDeclaration *> contexts;
   std::unordered_map<const ast::Expression *, ExpressionInfo> expressions;
+  std::unordered_map<const ast::Statement *, const ast::ContextDeclaration *> loopContexts;
 };
 
 CallableAnalysis validateCallables(const ast::Module &module);
