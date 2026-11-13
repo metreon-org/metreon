@@ -1,0 +1,62 @@
+context Gpu::Thread grants {} gpu_thread;
+context Gpu::Loop gpu_loop;
+
+procedure observe(value: i32) -> i32 {
+    return value;
+}
+
+procedure calculate(@cx: gpu_thread; limit: i32) -> i32 {
+    i32 total = 0;
+    for<@cx: gpu_loop> (i32 i) in 0..limit {
+        if (i == 2) {
+            continue;
+        }
+        total = total + i;
+    }
+    while<@cx: gpu_loop> (total < 14) {
+        total = total + 1;
+    }
+    until<@cx: gpu_loop> (total == 16 is true) {
+        total = total + 1;
+    }
+    until<@cx: gpu_loop> (total < 18 is false) {
+        total = total + 1;
+    }
+    loop (@cx: gpu_loop) {
+        total = total + 1;
+        if (total >= 20) {
+            break;
+        }
+    }
+    if (total == 20 && limit > 0) {
+        return total + 22;
+    } else if (limit == 0) {
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
+kernel work(@cx: gpu_thread; limit: i32) {
+    for<@cx: gpu_loop> (index i) in 0..8 {
+        if (i < 4) {
+            observe(1);
+            observe(3);
+        } else {
+            observe(2);
+        }
+    }
+    for<@cx: gpu_loop> (i32 j) in 0..limit {
+        observe(j);
+    }
+    i32 result = calculate(@cx; limit);
+    if (result > 0) {
+        observe(result);
+    }
+    return;
+}
+
+// Host bodies remain semantic/deferred in GPU emission mode.
+procedure host_only() -> i32 {
+    return 7;
+}

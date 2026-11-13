@@ -4,6 +4,8 @@
 #include "metreon/Parser/Parser.h"
 #ifdef METREON_ENABLE_MLIR
 #include "metreon/MLIR/Import.h"
+#include "metreon/MLIR/HostLowering.h"
+#include "metreon/MLIR/GPULowering.h"
 #include "mlir/IR/MLIRContext.h"
 #include "llvm/Support/raw_ostream.h"
 #endif
@@ -18,12 +20,14 @@
 namespace {
 
 void printUsage(std::ostream &output) {
-  output << "usage: metreonc [--emit=graphir|mlir] [--no-optimization] <input.mtr>\n"
-            "       metreonc [--emit graphir|mlir] [--no-optimization] -\n"
+  output << "usage: metreonc [--emit=graphir|mlir|llvm|gpu] [--no-optimization] <input.mtr>\n"
+            "       metreonc [--emit graphir|mlir|llvm|gpu] [--no-optimization] -\n"
             "GraphIR optimization passes run by default; --no-optimization skips them.\n"
             "Writes <input-stem>.graphir or .mlir (stdin for -) to\n"
-            "  tmp/graphir/ or tmp/mlir/ relative to the current working directory.\n"
-            "MLIR requires METREON_ENABLE_MLIR=ON; ordinary bodies remain deferred.\n";
+            "  tmp/graphir/, tmp/mlir/, tmp/llvm/, or tmp/gpu/ relative to the working directory.\n"
+            "MLIR requires METREON_ENABLE_MLIR=ON; --emit=mlir preserves deferred bodies.\n"
+            "--emit=llvm converts checked host scalar GraphIR CFGs to LLVM-dialect MLIR.\n"
+            "--emit=gpu lowers checked GPU scalar control flow to affine/scf MLIR.\n";
 }
 
 std::string readSource(const std::string &path) {
@@ -53,14 +57,15 @@ int main(int argc, char **argv) {
       printUsage(std::cout);
       return 0;
     }
-    if (argument == "--emit=graphir" || argument == "--emit=mlir") {
+    if (argument == "--emit=graphir" || argument == "--emit=mlir" || argument == "--emit=llvm" || argument == "--emit=gpu") {
       emitFormat = argument.substr(7);
       continue;
     }
     if (argument == "--emit") {
       if (index + 1 >= argc || (std::string(argv[index + 1]) != "graphir" &&
-                               std::string(argv[index + 1]) != "mlir")) {
-        std::cerr << "metreonc: --emit requires the format `graphir` or `mlir`\n";
+                               std::string(argv[index + 1]) != "mlir" && std::string(argv[index + 1]) != "llvm" &&
+                               std::string(argv[index + 1]) != "gpu")) {
+        std::cerr << "metreonc: --emit requires the format `graphir`, `mlir`, `llvm`, or `gpu`\n";
         printUsage(std::cerr);
         return 1;
       }
@@ -92,7 +97,7 @@ int main(int argc, char **argv) {
 
   const std::string sourceName = inputPath == "-" ? "<stdin>" : inputPath;
 #ifndef METREON_ENABLE_MLIR
-  if (emitFormat == "mlir") {
+  if (emitFormat != "graphir") {
     std::cerr << "metreonc: MLIR emission requires a build with METREON_ENABLE_MLIR=ON\n";
     return 1;
   }
@@ -112,20 +117,23 @@ int main(int argc, char **argv) {
 #ifdef METREON_ENABLE_MLIR
     else {
       mlir::MLIRContext context;
-      auto imported = metreon::importGraphIR(graph, context);
+      auto imported = emitFormat == "llvm" ? metreon::lowerHostToLLVM(graph, context)
+                      : emitFormat == "gpu" ? metreon::lowerGPUControlFlow(graph, context)
+                                           : metreon::importGraphIR(graph, context);
       if (mlir::failed(imported)) return 1;
       llvm::raw_string_ostream output(outputText);
       (*imported)->print(output, mlir::OpPrintingFlags().enableDebugInfo());
       output << '\n';
     }
 #endif
-    const std::string outputLabel = emitFormat == "mlir" ? "MLIR" : "GraphIR";
+    const std::string outputLabel = emitFormat == "llvm" ? "LLVM MLIR" : emitFormat == "gpu" ? "GPU MLIR"
+                                     : emitFormat == "mlir" ? "MLIR" : "GraphIR";
     const std::filesystem::path outputDirectory =
         std::filesystem::path("tmp") / emitFormat;
     std::filesystem::path outputName =
         inputPath == "-" ? "stdin.graphir"
                          : std::filesystem::path(inputPath).filename();
-    outputName.replace_extension("." + emitFormat);
+    outputName.replace_extension(emitFormat == "graphir" ? ".graphir" : ".mlir");
     std::filesystem::create_directories(outputDirectory);
     const auto outputPath = outputDirectory / outputName;
     std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);

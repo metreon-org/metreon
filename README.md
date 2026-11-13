@@ -144,10 +144,148 @@ local reads/writes, so a predicate observes the current value on every iteration
 There is no separate loop or conditional section. Existing straight-line dumps
 retain their earlier representation for compatibility.
 
-The optional MLIR importer preserves the new operation trees and CFG edges as
-deferred body metadata. It does not create Metreon arithmetic, loop, or branch
-operations. This frontend/GraphIR support does not establish native/GPU execution
-or hardware clock timing.
+The `--emit=mlir` importer preserves the operation trees and CFG edges as deferred
+body metadata. It does not create Metreon arithmetic, loop, or branch operations.
+Executable host scalar conversion is available separately through `--emit=llvm`,
+as described below. GPU execution and hardware clock timing remain outside that path.
+
+## Lower host scalar control flow to LLVM
+
+An MLIR-enabled build accepts `--emit=llvm` (or `--emit llvm`) and writes
+LLVM-dialect MLIR to `tmp/llvm/<input-stem>.mlir`. Stdin uses `stdin.mlir`.
+GraphIR remains the default output format, and semantic `--emit=mlir` retains its
+existing behavior.
+
+```sh
+./build-mlir/metreonc --emit=graphir tests/Inputs/HostControlFlow.mtr
+./build-mlir/metreonc --emit=llvm tests/Inputs/HostControlFlow.mtr
+cat tmp/graphir/HostControlFlow.graphir
+cat tmp/llvm/HostControlFlow.mlir
+./build-mlir/metreon-opt tmp/llvm/HostControlFlow.mlir -o /tmp/host.checked.mlir
+```
+
+The lowering consumes the current **in-memory GraphIR**, following frontend
+validation and the selected GraphIR optimization pipeline. It repeats the
+existing semantic-import checks on that exact object: nominal context identity,
+module ownership, declarations and call contracts, CFG value availability,
+lexical scopes, and definite initialization. It then checks host eligibility and
+the supported type/operation subset. A stale verification marker cannot authorize
+conversion, and an import/lowering failure does not replace the previous artifact.
+
+Conversion follows this route:
+
+```text
+.mtr -> validated GraphIR -> default GraphIR passes
+     -> fresh semantic/CFG checks and host eligibility checks
+     -> func + arith + cf + rank-0 memref locals
+     -> one shared LLVM type converter and full dialect conversion
+     -> verified builtin.module containing only llvm operations
+```
+
+The existing GraphIR CFG supplies every branch, conditional edge, loop backedge,
+break/continue destination, and return. The backend does not reconstruct control
+flow from source text or parse a GraphIR dump. Mutable scalar slots allocate once
+per function invocation; their initialization stores remain at their original
+GraphIR execution points. These scalar slots do not infer a layout for a source
+buffer or view.
+
+The supported subset comprises host/context-independent procedures, direct calls
+between those procedures, unowned integer/Boolean/floating scalars, assignment,
+arithmetic, comparisons, short-circuit logic, conditionals, and integer-range
+loops. `index` uses the native host pointer width; the module records the native
+target triple. This is a native-host profile, not a cross-compilation interface.
+Signedness is checked from GraphIR source types before equal-width integer types
+are converted. Integer literals must fit their destination types; floating
+constants round to the destination precision with round-to-nearest, ties-to-even,
+preserving signed zero and explicit infinity. Arithmetic otherwise follows
+standard MLIR/LLVM scalar semantics.
+
+Execution-context parameters and loop evidence have no runtime ABI arguments;
+they are erased only after the applicable checks. Resource ownership, transition
+implementations, host runtime adapters, and unrefined view/buffer layouts remain
+unsupported for executable conversion. Container loops therefore require a future
+explicit extent/layout/access contract. Modules containing kernels or pipeline
+execution are rejected by this output mode. No GPU or FPGA/ASIC execution
+conversion is added.
+
+The tracked [host fixture](tests/Inputs/HostControlFlow.mtr) exercises all four loop
+forms, both `until` stop values, branches, breaks, continues, and a checked host
+procedure call. Its LLVM `main` has no context argument and returns 42. Tests
+check structural validity, GraphIR preservation, rejected unsafe/unsupported
+inputs, and previous-artifact preservation. When matching `mlir-translate` and
+`lli` tools are available, CTest also translates the output to LLVM IR and executes
+host cases in both GraphIR optimization modes. This output mode emits MLIR; it
+does not itself link a standalone executable.
+
+## Lower GPU scalar control flow to Affine and SCF
+
+An MLIR-enabled build accepts `--emit=gpu` (or `--emit gpu`), producing
+`tmp/gpu/<input-stem>.mlir`. Stdin uses `tmp/gpu/stdin.mlir`.
+
+```sh
+./build-mlir/metreonc --emit=graphir tests/Inputs/GPUControlFlow.mtr
+./build-mlir/metreonc --emit=gpu tests/Inputs/GPUControlFlow.mtr
+cat tmp/gpu/GPUControlFlow.mlir
+./build-mlir/metreon-opt tmp/gpu/GPUControlFlow.mlir -o /tmp/gpu.checked.mlir
+```
+
+The input is the current in-memory GraphIR after the selected GraphIR passes.
+The existing semantic importer checks that exact graph again, including nominal
+execution contexts, module ownership, call contracts, CFG dominance/scopes and
+definite initialization. GPU eligibility checks require `Gpu::` execution
+contexts and grant-free `Gpu::Loop` evidence. The same scalar CFG realization
+used by the host backend produces `func`/`arith`/`cf` and private rank-0 local
+slots. MLIR's memory-to-SSA and CFG-to-SCF transformations then preserve the
+checked CFG's control flow as structured operations. There is no direct source
+or printed-GraphIR input to executable lowering.
+
+SCF normalization applies upstream scalar/branch/signature patterns while
+restricting dead-code removal to regionless operations. It preserves empty and
+conditionally nonterminating loops; a generic effect-based canonicalizer could
+otherwise remove a result-free loop. Later backend pass pipelines must retain
+this control-flow requirement as well.
+
+The output preserves Metreon semantic contracts and adds a `gpu.module`.
+Source kernels become `gpu.func ... kernel`; GPU-context procedures and their
+reachable context-independent helpers become `func.func` device functions in
+that module. Each lowered contract has a `metreon.device_body` symbol reference.
+Other bodies, including host procedures, retain their deferred semantic form.
+Context and loop evidence are checked metadata and never runtime GPU arguments.
+
+Dialect selection is conservative:
+
+| Control flow | Emission |
+| --- | --- |
+| Exact signed `<`/unit-step counted recurrence with an invariant upper bound and no observable final IV | `scf.for`, including loop-carried scalar values and structured continues |
+| Counted loop with legal affine bounds and `index` or signed integer induction up to 32 bits | `affine.for`; integer IVs are widened to the 64-bit index profile and cast back for source arithmetic |
+| Signed/equality comparisons of proven nonnegative, valid affine indices | `affine.if`; the nonnegative proof prevents overflow in constraint subtraction |
+| General predicates, short circuiting and other branches | `scf.if` (or an equivalent canonicalized scalar select) |
+| Data-dependent loops, `until`, unbounded loops, early exits, or unmatched/unsigned recurrences | `scf.while` with the CFG's exit and continuation semantics |
+
+Affine dimension/symbol legality is checked in the final device region. In
+MLIR 18, `gpu.func` has no `AffineScope` trait, so a kernel argument is not
+automatically an affine symbol: a dynamic kernel bound can remain `scf.for`
+while a constant-bound loop becomes `affine.for`. Nested affine IVs are used
+only where their bounds satisfy the same legality checks. Bounds evaluated once
+by GraphIR remain evaluated once; a mutable `while` bound is not frozen into a
+counted loop. Unsigned ranges preserve unsigned comparisons in SCF, and integer
+limits are not widened or truncated silently. `index` uses a 64-bit GPU scalar
+profile at this stage; other index widths need a future target configuration.
+
+This stage supports unowned Boolean/integer/floating scalars and direct device
+procedure calls. It rejects resource transitions without implementations,
+ownership-bearing values, unrefined buffers/views and container iteration
+without extent/layout/access contracts. No new synchronization, memory transfer,
+GPU launch, parallel work mapping, NVVM/SPIR-V conversion, device binary or
+FPGA/ASIC lowering is provided. Serial source loops stay serial per work item.
+Failures leave an existing output artifact intact.
+
+Tests cover dialect selection and MLIR round-tripping, invalid/mutated GraphIR,
+context evidence erasure, unchanged host bodies, both GraphIR optimization modes
+and CLI failure behavior. With matching `mlir-opt`, `mlir-translate` and `lli`,
+CTest also extracts the scalar device procedure bodies into a CPU-only test
+module, lowers Affine/SCF through the standard conversions and checks their
+results. These are serial control-flow regressions, not GPU hardware tests.
 
 ## GraphIR pass APIs
 

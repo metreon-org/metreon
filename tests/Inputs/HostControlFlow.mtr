@@ -1,0 +1,45 @@
+// Host-only fixture. The @cx parameter is checked metadata, never a runtime ABI argument.
+context Host::Process grants {} host_ctx;
+context Host::Loop host_loop;
+
+procedure calculate(@cx: host_ctx; limit: i32) -> i32 {
+    i32 total = 0;
+
+    for<@cx: host_loop> (i32 index) in 0..limit {
+        if (index == 2) {
+            continue;
+        }
+        total = total + index;
+    }
+
+    while<@cx: host_loop> (total < 14) {
+        total = total + 1;
+    }
+
+    until<@cx: host_loop> (total == 16 is true) {
+        total = total + 1;
+    }
+
+    until<@cx: host_loop> (total < 18 is false) {
+        total = total + 1;
+    }
+
+    loop (@cx: host_loop) {
+        total = total + 1;
+        if (total >= 20) {
+            break;
+        }
+    }
+
+    if (total == 20 && limit > 0) {
+        return total + 22;
+    } else if (limit == 0) {
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
+procedure main(@cx: host_ctx) -> i32 {
+    return calculate(@cx; 5);
+}
