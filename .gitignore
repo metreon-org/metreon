@@ -34,3 +34,6 @@ CMakeUserPresets.json
 
 # Temporary testing files(directory)
 /tmp/
+
+# Local editor settings
+.vscode/
