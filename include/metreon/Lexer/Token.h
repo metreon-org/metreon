@@ -26,6 +26,8 @@ enum class TokenKind {
   KeywordWhere,
   KeywordAllows,
   KeywordOwn,
+  KeywordIf, KeywordElse, KeywordLoop, KeywordFor, KeywordWhile, KeywordUntil,
+  KeywordIn, KeywordIs, KeywordBreak, KeywordContinue,
   ColonColon,
   Colon,
   Less,
@@ -40,7 +42,14 @@ enum class TokenKind {
   Bang,
   Equal,
   Minus,
+  Plus, Star, Slash, Percent, EqualEqual, BangEqual, LessEqual, GreaterEqual,
+  AndAnd, OrOr,
   Arrow,
+  FatArrow,
+  Dot,
+  DotDot,
+  LeftBracket,
+  RightBracket,
 };
 
 struct Token {

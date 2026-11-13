@@ -11,6 +11,7 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <functional>
 
 namespace metreon::graphir {
 
@@ -130,11 +131,23 @@ struct Edge {
 
 using ResourceNodeId = std::size_t;
 
-struct ResourceStateNode {
+enum class DefinitionKind { Protocol, ProtocolState, PipelineState, PipelineEdge,
+                            Stage, Topology, Schedule };
+
+struct DefinitionReference {
+  DefinitionKind kind = DefinitionKind::ProtocolState;
+  std::size_t index = 0;
+};
+
+struct ResourceDefinitionReference {
   ResourceNodeId id = 0;
-  std::string name;
-  std::map<std::string, std::string> attributes;
+  DefinitionReference target;
   SourceLocation location;
+};
+
+struct ResourceMemberReference {
+  std::size_t graph = 0;
+  ResourceNodeId member = 0;
 };
 
 struct ResourceTransitionEdge {
@@ -142,6 +155,17 @@ struct ResourceTransitionEdge {
   ResourceNodeId target = 0;
   std::map<std::string, std::string> attributes;
   SourceLocation location;
+};
+
+struct ResourceStateNode {
+  ResourceNodeId id = 0;
+  std::string name;
+  std::map<std::string, std::string> attributes;
+  SourceLocation location;
+  // A collapsed node is a structural container, not permission to skip its
+  // transitions. Members retain their original IDs, types and source locations.
+  std::vector<ResourceStateNode> members{};
+  std::vector<ResourceTransitionEdge> internalTransitions{};
 };
 
 class ResourceGraph {
@@ -158,6 +182,7 @@ public:
   void addTransition(ResourceNodeId source, ResourceNodeId target,
                      std::map<std::string, std::string> attributes,
                      SourceLocation location);
+  void addEntryState(ResourceNodeId state);
 
   const std::string &name() const noexcept { return name_; }
   const std::map<std::string, std::string> &attributes() const noexcept {
@@ -167,9 +192,21 @@ public:
   const std::vector<ResourceStateNode> &states() const noexcept {
     return states_;
   }
+  std::vector<ResourceStateNode> &states() noexcept { return states_; }
   const std::vector<ResourceTransitionEdge> &transitions() const noexcept {
     return transitions_;
   }
+  std::vector<ResourceTransitionEdge> &transitions() noexcept {
+    return transitions_;
+  }
+  const auto &entryStates() const noexcept { return entryStates_; }
+  ResourceNodeId addReference(DefinitionReference target, SourceLocation location) {
+    const auto id = references_.size();
+    references_.push_back({id, target, location});
+    return id;
+  }
+  const auto &references() const noexcept { return references_; }
+  auto &references() noexcept { return references_; }
 
 private:
   std::string name_;
@@ -177,6 +214,9 @@ private:
   SourceLocation location_;
   std::vector<ResourceStateNode> states_;
   std::vector<ResourceTransitionEdge> transitions_;
+  std::vector<ResourceDefinitionReference> references_;
+  std::vector<ResourceNodeId> entryStates_;
+  ResourceNodeId nextState_ = 0;
 };
 
 struct ResourceTypeCheck {
@@ -213,6 +253,7 @@ public:
       const noexcept {
     return specializations_;
   }
+  auto &specializations() noexcept { return specializations_; }
 
 private:
   std::string resourceName_;
@@ -223,7 +264,11 @@ private:
 
 using CallableValueId = std::size_t;
 
-enum class CallableOperationKind { Literal, Variable, Call, Block, Return };
+enum class CallableOperationKind {
+  Literal, Variable, Call, Block, Return, ContextRegion,
+  Unary, Binary, Load, Assign, If, Loop, For, While, Until, Break, Continue,
+  IteratorInit, IteratorHasNext, IteratorValue, IteratorAdvance
+};
 
 struct CallableOperation {
   CallableValueId id = 0;
@@ -234,7 +279,16 @@ struct CallableOperation {
   std::vector<CallableOperation> body;
   ContextMetadataRef context;
   SourceLocation location;
+  // Structured source control flow is projected into the existing callable CFG.
+  // Loop authority is metadata independent of the operation's execution context.
+  std::vector<CallableOperation> condition{}, alternative{}, initialization{}, step{};
+  ContextMetadataRef loopContext{};
 };
+
+const char *callableOperationKindName(CallableOperationKind kind);
+void walkCallableOperations(const std::vector<CallableOperation> &body,
+    const std::function<void(const CallableOperation &)> &visit);
+bool hasStructuredControlFlow(const std::vector<CallableOperation> &body);
 
 struct CallableParameter {
   // Context parameters have metadata identity, never a runtime value ID.
@@ -281,6 +335,47 @@ private:
 
 using KernelGraph = CallableGraph;
 using ProcedureGraph = CallableGraph;
+using StageGraph = CallableGraph;
+
+struct StageContextRegion {
+  ContextMetadataRef context;
+  // References to executions already listed by the fused worker, not extra
+  // stage invocations. Context regions do not introduce lexical lifetimes.
+  std::vector<DefinitionReference> stages;
+  SourceLocation location;
+};
+
+struct CompositionRecord {
+  std::string kind;
+  std::string name;
+  std::map<std::string, std::string> attributes;
+  std::vector<DefinitionReference> references;
+  SourceLocation location;
+  std::vector<StageContextRegion> contextRegions{};
+};
+
+struct CompositionDefinition {
+  DefinitionKind kind;
+  std::string name;
+  std::map<std::string, std::string> attributes;
+  std::vector<CompositionRecord> records;
+  SourceLocation location;
+};
+
+struct ProtocolGraph {
+  std::string name;
+  std::vector<std::string> roles;
+  std::vector<ResourceMemberReference> members;
+  SourceLocation location;
+  std::vector<DefinitionReference> entryStates{};
+};
+
+struct PipelineGraph {
+  std::string name;
+  std::vector<CompositionRecord> parameters;
+  std::vector<ResourceMemberReference> members;
+  SourceLocation location;
+};
 
 class Module {
 public:
@@ -312,11 +407,23 @@ public:
       SourceLocation location);
   KernelGraph &addKernelGraph(std::string name, SourceLocation location);
   ProcedureGraph &addProcedureGraph(std::string name, SourceLocation location);
+  StageGraph &addStageGraph(std::string name, SourceLocation location);
+  DefinitionReference addCompositionDefinition(CompositionDefinition definition);
+  CompositionDefinition &compositionDefinition(DefinitionReference reference);
+  void eraseCompositionDefinitions(const std::vector<std::size_t> &indices);
+  std::string definitionName(DefinitionReference reference) const;
+  ResourceMemberReference addResourceReference(std::size_t graph,
+                                               DefinitionReference definition,
+                                               SourceLocation location);
+  ProtocolGraph &addProtocolGraph(std::string name, SourceLocation location);
+  void setProtocolMembers(std::size_t index, std::vector<ResourceMemberReference> members);
+  PipelineGraph &addPipelineGraph(PipelineGraph group);
 
   // This is the enforcement point future runtime lowerings must use before
   // consuming context evidence. Every runtime-oriented use is rejected.
   void requireContextUse(const ContextMetadataRef &context,
                          ContextUse use) const;
+  std::size_t contextOrdinal(const ContextMetadataRef &context) const;
 
   const std::vector<ContextMetadataRef> &contexts() const noexcept {
     return contexts_;
@@ -326,16 +433,27 @@ public:
   const std::vector<ResourceGraph> &resourceGraphs() const noexcept {
     return resourceGraphs_;
   }
+  auto &resourceGraphs() noexcept { return resourceGraphs_; }
   const std::vector<ResourceContextTemplate> &resourceContextTemplates()
       const noexcept {
     return resourceContextTemplates_;
   }
+  auto &resourceContextTemplates() noexcept { return resourceContextTemplates_; }
   const std::vector<KernelGraph> &kernelGraphs() const noexcept {
     return kernelGraphs_;
   }
+  auto &kernelGraphs() noexcept { return kernelGraphs_; }
   const std::vector<ProcedureGraph> &procedureGraphs() const noexcept {
     return procedureGraphs_;
   }
+  auto &procedureGraphs() noexcept { return procedureGraphs_; }
+  const auto &stageGraphs() const noexcept { return stageGraphs_; }
+  auto &stageGraphs() noexcept { return stageGraphs_; }
+  const auto &compositionDefinitions() const noexcept { return compositionDefinitions_; }
+  auto &compositionDefinitions() noexcept { return compositionDefinitions_; }
+  const auto &protocolGraphs() const noexcept { return protocolGraphs_; }
+  auto &protocolGraphs() noexcept { return protocolGraphs_; }
+  const auto &pipelineGraphs() const noexcept { return pipelineGraphs_; }
   const std::string &sourceName() const noexcept { return sourceName_; }
 
   std::string print() const;
@@ -352,7 +470,13 @@ private:
   std::vector<ResourceContextTemplate> resourceContextTemplates_;
   std::vector<KernelGraph> kernelGraphs_;
   std::vector<ProcedureGraph> procedureGraphs_;
+  std::vector<StageGraph> stageGraphs_;
+  std::vector<CompositionDefinition> compositionDefinitions_;
+  std::vector<ProtocolGraph> protocolGraphs_;
+  std::vector<PipelineGraph> pipelineGraphs_;
 };
+
+const char *definitionKindName(DefinitionKind kind);
 
 const char *nodeKindName(NodeKind kind);
 const char *edgeKindName(EdgeKind kind);

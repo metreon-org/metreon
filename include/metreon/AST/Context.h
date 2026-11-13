@@ -7,6 +7,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <variant>
 
 namespace metreon::ast {
 
@@ -119,13 +120,14 @@ struct LiteralInitializer {
   SourceLocation location;
 };
 
-enum class ExpressionKind { Literal, Reference, ContextReference, Call };
+enum class ExpressionKind { Literal, Reference, ContextReference, Call, Unary, Binary, Range };
 
 struct Expression {
   ExpressionKind kind = ExpressionKind::Literal;
   LiteralInitializer literal;
   QualifiedName name;
   std::vector<Expression> arguments;
+  std::string op;
   SourceLocation location;
 };
 
@@ -137,13 +139,17 @@ struct VariableDeclaration {
   SourceLocation location;
 };
 
-enum class StatementKind { Variable, Call, Block, Return };
+enum class StatementKind { Variable, Call, Block, Return, Assignment, If,
+                           Loop, For, While, Until, Break, Continue };
 
 struct Statement {
   StatementKind kind = StatementKind::Block;
   VariableDeclaration variable;
   std::optional<Expression> expression;
   std::vector<Statement> statements;
+  std::vector<Statement> alternative;
+  QualifiedName loopContext;
+  bool stopValue = true;
   SourceLocation location;
 };
 
@@ -232,11 +238,131 @@ struct ResourceDeclaration {
   SourceLocation location;
 };
 
+struct NamedReference {
+  std::string name;
+  SourceLocation location;
+};
+
+struct ProtocolMessage {
+  NamedReference sender;
+  NamedReference receiver;
+  std::string name;
+  std::vector<ResourceField> payload;
+  NamedReference successor;
+  SourceLocation location;
+};
+
+struct ProtocolState {
+  std::string name;
+  bool isFinal = false;
+  std::vector<ProtocolMessage> messages;
+  SourceLocation location;
+};
+
+struct ProtocolDeclaration {
+  QualifiedName name;
+  std::vector<NamedReference> roles;
+  std::vector<ProtocolState> states;
+  SourceLocation location;
+};
+
+struct CompositionProperty {
+  std::string name;
+  std::variant<LiteralInitializer, TypeReference> value;
+  SourceLocation location;
+
+  std::string str() const {
+    if (const auto *literal = std::get_if<LiteralInitializer>(&value)) {
+      return literal->value;
+    }
+    return std::get<TypeReference>(value).str();
+  }
+};
+
+enum class PipelineDirection { Input, Output };
+
+struct PipelineParameter {
+  PipelineDirection direction = PipelineDirection::Input;
+  std::string name;
+  ValueType type;
+  SourceLocation location;
+};
+
+struct PipelineState {
+  std::string name;
+  ValueType type;
+  std::vector<CompositionProperty> properties;
+  SourceLocation location;
+};
+
+struct PipelineEdge {
+  std::string name;
+  TypeReference type;
+  std::vector<CompositionProperty> properties;
+  SourceLocation location;
+};
+
+struct TopologyEndpoint {
+  std::string node;
+  std::string port;
+  SourceLocation location;
+
+  std::string str() const { return node + (port.empty() ? "" : "." + port); }
+};
+
+struct TopologyConnection {
+  TopologyEndpoint source;
+  TopologyEndpoint target;
+  std::optional<NamedReference> edge;
+  SourceLocation location;
+};
+
+struct PipelineTopology {
+  std::vector<TopologyConnection> connections;
+  SourceLocation location;
+};
+
+struct ScheduleKernel {
+  std::string name;
+  std::vector<NamedReference> stages;
+  std::vector<CompositionProperty> properties;
+  SourceLocation location;
+};
+
+struct SchedulePlacement {
+  NamedReference stage;
+  NamedReference worker;
+  std::string unit;
+  LiteralInitializer first;
+  std::optional<LiteralInitializer> last;
+  SourceLocation location;
+};
+
+struct PipelineSchedule {
+  std::string name;
+  std::vector<ScheduleKernel> kernels;
+  std::vector<SchedulePlacement> placements;
+  SourceLocation location;
+};
+
+struct PipelineDeclaration {
+  QualifiedName name;
+  std::vector<PipelineParameter> parameters;
+  std::vector<PipelineState> states;
+  std::vector<PipelineEdge> edges;
+  std::vector<CallableDeclaration> stages;
+  std::optional<PipelineTopology> topology;
+  std::vector<PipelineSchedule> schedules;
+  SourceLocation location;
+};
+
 struct Module {
   std::vector<ContextDeclaration> contexts;
   std::vector<ResourceDeclaration> resources;
   std::vector<KernelDeclaration> kernels;
   std::vector<ProcedureDeclaration> procedures;
+  std::vector<ProtocolDeclaration> protocols;
+  std::vector<PipelineDeclaration> pipelines;
 };
 
 } // namespace metreon::ast

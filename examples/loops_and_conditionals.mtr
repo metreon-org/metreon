@@ -1,0 +1,81 @@
+// Control flow is emitted inside graphir.cfg. Loop contexts carry no grants.
+context Host::Loop host_loop;
+context Gpu::Loop gpu_loop;
+context Gpu::Thread grants {} gpu_thread;
+
+procedure count() -> i32 {
+    i32 total = 0;
+
+    loop (@cx: host_loop) {
+        total = total + 1;
+        if (total == 2) {
+            break;
+        }
+    }
+
+    for<@cx: host_loop> (i32 index) in 0..4 {
+        if (index == 1) {
+            continue;
+        }
+        total = total + index;
+    }
+
+    while<@cx: host_loop> (total < 10) {
+        total = total + 1;
+    }
+
+    until<@cx: host_loop> (total == 12 is true) {
+        total = total + 1;
+    }
+
+    until<@cx: host_loop> (total < 14 is false) {
+        total = total + 1;
+    }
+
+    if (total == 14 && total > 0) {
+        return total;
+    } else if (total < 0) {
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
+procedure sum_positive(values: view<i32, host::memory>) -> i32 {
+    i32 sum = 0;
+    for<@cx: host_loop> (i32 value) in values {
+        if (value < 0) {
+            continue;
+        }
+        if (value == 0) {
+            break;
+        }
+        sum = sum + value;
+    }
+    return sum;
+}
+
+procedure advance(value: i32, limit: i32) -> i32 {
+    while<@cx: host_loop> (value < limit) {
+        value = value + 1;
+    }
+    return value;
+}
+
+procedure initialized_by_branches(select_first: bool) -> i32 {
+    i32 result;
+    if (select_first) {
+        result = 7;
+    } else {
+        result = 9;
+    }
+    return result;
+}
+
+kernel count_on_gpu(@cx: gpu_thread; limit: i32) {
+    i32 index = 0;
+    while<@cx: gpu_loop> (index < limit) {
+        index = index + 1;
+    }
+    return;
+}

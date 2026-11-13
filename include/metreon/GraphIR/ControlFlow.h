@@ -9,7 +9,7 @@ namespace metreon::graphir {
 
 using ControlFlowBlockId = std::size_t;
 
-enum class ControlFlowTerminatorKind { Branch, Return };
+enum class ControlFlowTerminatorKind { Branch, Return, ConditionalBranch };
 
 struct ControlFlowTerminator {
   ControlFlowTerminatorKind kind = ControlFlowTerminatorKind::Return;
@@ -18,6 +18,8 @@ struct ControlFlowTerminator {
   std::optional<CallableValueId> operation;
   std::vector<CallableValueId> operands;
   SourceLocation location;
+  std::optional<ControlFlowBlockId> falseSuccessor{};
+  std::string control{};
 };
 
 struct ControlFlowBlock {
@@ -28,6 +30,8 @@ struct ControlFlowBlock {
   std::vector<CallableValueId> operations;
   ControlFlowTerminator terminator;
   SourceLocation location;
+  std::map<std::string, std::string> attributes{};
+  ContextMetadataRef loopContext{};
 };
 
 struct CallableControlFlow {
@@ -35,8 +39,8 @@ struct CallableControlFlow {
   std::vector<ControlFlowBlock> blocks;
 };
 
-// Project the currently supported straight-line callable bodies into basic
-// blocks. Scope entry/exit uses branches; any nested return exits the callable.
+// Project structured callable bodies into basic blocks, including conditional
+// edges, loop backedges and nearest-loop break/continue destinations.
 // The projection is rebuilt from the body so mutations cannot leave stale CFGs.
 CallableControlFlow buildControlFlow(const CallableGraph &callable);
 

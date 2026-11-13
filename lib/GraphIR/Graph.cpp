@@ -1,6 +1,8 @@
 #include "metreon/GraphIR/Graph.h"
 #include "metreon/GraphIR/ControlFlow.h"
+#include "metreon/GraphIR/Composition.h"
 
+#include <algorithm>
 #include <atomic>
 #include <functional>
 #include <sstream>
@@ -8,6 +10,52 @@
 #include <string>
 
 namespace metreon::graphir {
+
+const char *callableOperationKindName(CallableOperationKind kind) {
+  switch (kind) {
+  case CallableOperationKind::Literal: return "literal";
+  case CallableOperationKind::Variable: return "variable_decl";
+  case CallableOperationKind::Call: return "call";
+  case CallableOperationKind::Block: return "block";
+  case CallableOperationKind::Return: return "return";
+  case CallableOperationKind::ContextRegion: return "context_region";
+  case CallableOperationKind::Unary: return "unary";
+  case CallableOperationKind::Binary: return "binary";
+  case CallableOperationKind::Load: return "load";
+  case CallableOperationKind::Assign: return "assign";
+  case CallableOperationKind::If: return "if";
+  case CallableOperationKind::Loop: return "loop";
+  case CallableOperationKind::For: return "for";
+  case CallableOperationKind::While: return "while";
+  case CallableOperationKind::Until: return "until";
+  case CallableOperationKind::Break: return "break";
+  case CallableOperationKind::Continue: return "continue";
+  case CallableOperationKind::IteratorInit: return "iterator_init";
+  case CallableOperationKind::IteratorHasNext: return "iterator_has_next";
+  case CallableOperationKind::IteratorValue: return "iterator_value";
+  case CallableOperationKind::IteratorAdvance: return "iterator_advance";
+  }
+  throw std::logic_error("unknown callable operation kind");
+}
+
+void walkCallableOperations(const std::vector<CallableOperation> &body,
+    const std::function<void(const CallableOperation &)> &visit) {
+  for (const auto &op : body) {
+    visit(op);
+    for (const auto *children : {&op.initialization, &op.condition, &op.body, &op.alternative, &op.step})
+      walkCallableOperations(*children, visit);
+  }
+}
+
+bool hasStructuredControlFlow(const std::vector<CallableOperation> &body) {
+  bool result = false;
+  walkCallableOperations(body, [&](const auto &op) {
+    if (op.kind == CallableOperationKind::If || op.kind == CallableOperationKind::Loop ||
+        op.kind == CallableOperationKind::For || op.kind == CallableOperationKind::While ||
+        op.kind == CallableOperationKind::Until) result = true;
+  });
+  return result;
+}
 
 namespace {
 
@@ -140,7 +188,11 @@ Module::Module(Module &&other) noexcept
       resourceContextTemplates_(
           std::move(other.resourceContextTemplates_)),
       kernelGraphs_(std::move(other.kernelGraphs_)),
-      procedureGraphs_(std::move(other.procedureGraphs_)) {
+      procedureGraphs_(std::move(other.procedureGraphs_)),
+      stageGraphs_(std::move(other.stageGraphs_)),
+      compositionDefinitions_(std::move(other.compositionDefinitions_)),
+      protocolGraphs_(std::move(other.protocolGraphs_)),
+      pipelineGraphs_(std::move(other.pipelineGraphs_)) {
   // Keep a moved-from module valid without letting it mint duplicate keys.
   other.sourceName_.clear();
   other.contexts_.clear();
@@ -150,6 +202,10 @@ Module::Module(Module &&other) noexcept
   other.resourceContextTemplates_.clear();
   other.kernelGraphs_.clear();
   other.procedureGraphs_.clear();
+  other.stageGraphs_.clear();
+  other.compositionDefinitions_.clear();
+  other.protocolGraphs_.clear();
+  other.pipelineGraphs_.clear();
   other.moduleIdentity_ = mintModuleIdentity();
 }
 
@@ -167,6 +223,10 @@ Module &Module::operator=(Module &&other) noexcept {
   resourceContextTemplates_ = std::move(other.resourceContextTemplates_);
   kernelGraphs_ = std::move(other.kernelGraphs_);
   procedureGraphs_ = std::move(other.procedureGraphs_);
+  stageGraphs_ = std::move(other.stageGraphs_);
+  compositionDefinitions_ = std::move(other.compositionDefinitions_);
+  protocolGraphs_ = std::move(other.protocolGraphs_);
+  pipelineGraphs_ = std::move(other.pipelineGraphs_);
   other.sourceName_.clear();
   other.contexts_.clear();
   other.nodes_.clear();
@@ -175,6 +235,10 @@ Module &Module::operator=(Module &&other) noexcept {
   other.resourceContextTemplates_.clear();
   other.kernelGraphs_.clear();
   other.procedureGraphs_.clear();
+  other.stageGraphs_.clear();
+  other.compositionDefinitions_.clear();
+  other.protocolGraphs_.clear();
+  other.pipelineGraphs_.clear();
   other.moduleIdentity_ = mintModuleIdentity();
   return *this;
 }
@@ -182,7 +246,7 @@ Module &Module::operator=(Module &&other) noexcept {
 ResourceNodeId ResourceGraph::addState(
     std::string name, std::map<std::string, std::string> attributes,
     SourceLocation location) {
-  const ResourceNodeId id = states_.size();
+  const ResourceNodeId id = nextState_++;
   states_.push_back(ResourceStateNode{id, std::move(name),
                                       std::move(attributes), location});
   return id;
@@ -214,12 +278,25 @@ CallableOperation CallableGraph::makeOperation(CallableOperationKind kind,
 void ResourceGraph::addTransition(
     ResourceNodeId source, ResourceNodeId target,
     std::map<std::string, std::string> attributes, SourceLocation location) {
-  if (source >= states_.size() || target >= states_.size()) {
+  const auto exists = [&](ResourceNodeId id) {
+    return std::any_of(states_.begin(), states_.end(),
+                       [&](const auto &state) { return state.id == id; });
+  };
+  if (!exists(source) || !exists(target)) {
     throw std::logic_error(
         "GraphIR resource transition refers to an unknown state node");
   }
   transitions_.push_back(ResourceTransitionEdge{
       source, target, std::move(attributes), location});
+}
+
+void ResourceGraph::addEntryState(ResourceNodeId state) {
+  if (std::none_of(states_.begin(), states_.end(),
+                   [&](const auto &node) { return node.id == state; })) {
+    throw std::logic_error("GraphIR resource entry refers to an unknown state");
+  }
+  if (std::find(entryStates_.begin(), entryStates_.end(), state) == entryStates_.end())
+    entryStates_.push_back(state);
 }
 
 ContextTemplateSpecialization &
@@ -260,6 +337,11 @@ void Module::requireContextUse(const ContextMetadataRef &context,
     throw std::logic_error("GraphIR context key forbids " +
                            std::string(contextUseName(use)));
   }
+}
+
+std::size_t Module::contextOrdinal(const ContextMetadataRef &context) const {
+  requireContextUse(context, ContextUse::MetadataAttachment);
+  return context->key_.ordinal_;
 }
 
 NodeId Module::addNode(NodeKind kind, std::string name,
@@ -437,20 +519,14 @@ std::string Module::print() const {
         for (const auto &operation : body) {
           output << std::string(indent, ' ');
           const bool isBlock = operation.kind == CallableOperationKind::Block;
+          const bool isContextRegion = operation.kind == CallableOperationKind::ContextRegion;
           const bool isReturn = operation.kind == CallableOperationKind::Return;
           const auto type = operation.attributes.find("type");
           const bool isVoid = type != operation.attributes.end() && type->second == "void";
-          if (!isBlock && !isReturn && !isVoid) {
+          if (!isBlock && !isContextRegion && !isReturn && !isVoid) {
             output << valuePrefix << operation.id << " = ";
           }
-          const char *operationName = "";
-          switch (operation.kind) {
-          case CallableOperationKind::Literal: operationName = "literal"; break;
-          case CallableOperationKind::Variable: operationName = "variable_decl"; break;
-          case CallableOperationKind::Call: operationName = "call"; break;
-          case CallableOperationKind::Block: operationName = "block"; break;
-          case CallableOperationKind::Return: operationName = "return"; break;
-          }
+          const char *operationName = callableOperationKindName(operation.kind);
           output << "graphir." << operationName;
           if (!operation.name.empty()) {
             output << " \"" << escapeString(operation.name) << '\"';
@@ -473,7 +549,7 @@ std::string Module::print() const {
           output << " id(#" << prefix << index << "op" << operation.id << ')';
           printContext(operation.context);
           printLocation(operation.location);
-          if (isBlock) {
+          if (isBlock || isContextRegion) {
             output << " {\n";
             printBody(operation.body, indent + 2);
             output << std::string(indent, ' ') << "}\n";
@@ -482,28 +558,63 @@ std::string Module::print() const {
           }
         }
       };
-      printBody(callable.body(), 4);
+      // Structured execution is printed exactly once, in the existing CFG.
+      // Retain the legacy straight-line rendering for existing consumers.
+      if (!hasStructuredControlFlow(callable.body())) printBody(callable.body(), 4);
       output << "  }\n";
     }
   };
   printCallables(kernelGraphs_, "kernel", "k");
   printCallables(procedureGraphs_, "procedure", "p");
+  printCallables(stageGraphs_, "stage", "t");
+  output << printCompositions(*this);
 
-  for (const ResourceGraph &resource : resourceGraphs_) {
+  for (std::size_t graphIndex = 0; graphIndex < resourceGraphs_.size(); ++graphIndex) {
+    const ResourceGraph &resource = resourceGraphs_[graphIndex];
     output << '\n';
-    output << "  graphir.resource_graph \"" << escapeString(resource.name())
+    output << "  ";
+    if (!resource.references().empty()) output << "#rg" << graphIndex << " = ";
+    output << "graphir.resource_graph \"" << escapeString(resource.name())
            << '\"';
     printAttributes(output, resource.attributes());
     output << " loc(\"" << escapeString(sourceName_) << "\":"
            << resource.location().line << ':' << resource.location().column
            << ") {\n";
 
+    for (const auto &reference : resource.references()) {
+      output << "    %r" << reference.id << " = graphir.definition_ref @\""
+             << escapeString(definitionName(reference.target)) << '\"';
+      printAttributes(output, {{"kind", definitionKindName(reference.target.kind)}});
+      printLocation(reference.location);
+      output << '\n';
+    }
+
     for (const ResourceStateNode &state : resource.states()) {
       output << "    %s" << state.id << " = graphir.resource_state \""
              << escapeString(state.name) << '\"';
       printAttributes(output, state.attributes);
       output << " loc(\"" << escapeString(sourceName_) << "\":"
-             << state.location.line << ':' << state.location.column << ")\n";
+             << state.location.line << ':' << state.location.column << ')';
+      if (state.members.empty()) {
+        output << '\n';
+        continue;
+      }
+      output << " {\n";
+      for (const auto &member : state.members) {
+        output << "      graphir.state_member %s" << member.id << " \""
+               << escapeString(member.name) << '\"';
+        printAttributes(output, member.attributes);
+        printLocation(member.location);
+        output << '\n';
+      }
+      for (const auto &transition : state.internalTransitions) {
+        output << "      graphir.internal_transition %s" << transition.source
+               << " -> %s" << transition.target;
+        printAttributes(output, transition.attributes);
+        printLocation(transition.location);
+        output << '\n';
+      }
+      output << "    }\n";
     }
 
     if (!resource.states().empty() && !resource.transitions().empty()) {
@@ -597,6 +708,20 @@ std::string Module::print() const {
     for (std::size_t index = 0; index < callables.size(); ++index) {
       const auto &callable = callables[index];
       const auto cfg = buildControlFlow(callable);
+      const bool detailed = hasStructuredControlFlow(callable.body());
+      std::map<CallableValueId, const CallableOperation *> operations;
+      walkCallableOperations(callable.body(), [&](const auto &op) { operations.emplace(op.id, &op); });
+      std::map<CallableValueId, ContextMetadataRef> effectiveContexts;
+      std::function<void(const std::vector<CallableOperation> &, ContextMetadataRef)> contexts;
+      contexts = [&](const auto &body, ContextMetadataRef ambient) {
+        for (const auto &op : body) {
+          auto effective = op.context ? op.context : ambient;
+          effectiveContexts.emplace(op.id, effective);
+          for (const auto *children : {&op.initialization, &op.condition, &op.body, &op.alternative, &op.step})
+            contexts(*children, effective);
+        }
+      };
+      contexts(callable.body(), callable.context());
       const auto callablePrefix = prefix + std::to_string(index);
       const auto blockPrefix = "^" + callablePrefix + "bb";
       const auto operationPrefix = "#" + callablePrefix + "op";
@@ -628,15 +753,49 @@ std::string Module::print() const {
           output << operationPrefix << block.scopes[scope];
         }
         output << ')';
+        if (!block.attributes.empty()) printAttributes(output, block.attributes);
+        if (block.loopContext) {
+          requireContextUse(block.loopContext, ContextUse::MetadataAttachment);
+          output << " loop_context(#ctx" << contextOrdinal(block.loopContext) << ')';
+        }
         printLocation(block.location);
         output << " {\n";
         for (const auto operation : block.operations) {
-          output << "        graphir.cfg.op " << operationPrefix << operation << '\n';
+          output << "        graphir.cfg.op " << operationPrefix << operation;
+          if (detailed) {
+            const auto &op = *operations.at(operation);
+            output << ' ';
+            const auto type = op.attributes.find("type");
+            if (type != op.attributes.end() && type->second != "void") output << valuePrefix << op.id << " = ";
+            output << callableOperationKindName(op.kind);
+            if (!op.name.empty()) output << " \"" << escapeString(op.name) << '"';
+            if (!op.operands.empty()) {
+              output << " operands(";
+              for (std::size_t arg = 0; arg < op.operands.size(); ++arg) {
+                if (arg) output << ", ";
+                output << valuePrefix << op.operands[arg];
+              }
+              output << ')';
+            }
+            printAttributes(output, op.attributes);
+            printContext(effectiveContexts.at(op.id));
+            printLocation(op.location);
+          }
+          output << '\n';
         }
         const auto &terminator = block.terminator;
         if (terminator.kind == ControlFlowTerminatorKind::Branch) {
           output << "        graphir.cfg.br " << blockPrefix
                  << terminator.successor.value();
+          if (!terminator.control.empty()) {
+            printAttributes(output, {{"control", terminator.control}});
+            if (terminator.operation) output << " id(" << operationPrefix << *terminator.operation << ')';
+          }
+        } else if (terminator.kind == ControlFlowTerminatorKind::ConditionalBranch) {
+          output << "        graphir.cfg.cond_br " << valuePrefix << terminator.operands.at(0)
+                 << " true(" << blockPrefix << terminator.successor.value() << ") false("
+                 << blockPrefix << terminator.falseSuccessor.value() << ')';
+          if (terminator.operation) output << " id(" << operationPrefix << *terminator.operation << ')';
         } else {
           output << "        graphir.cfg.return";
           if (terminator.operation) {
@@ -663,6 +822,7 @@ std::string Module::print() const {
   };
   printControlFlow(kernelGraphs_, "kernel", "k");
   printControlFlow(procedureGraphs_, "procedure", "p");
+  printControlFlow(stageGraphs_, "stage", "t");
   output << "  }\n}\n";
   return output.str();
 }

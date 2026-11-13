@@ -1,0 +1,43 @@
+// Compare the default GraphIR output with --no-optimization.
+context Host::Process grants {poll, gpu_await} host;
+
+resource Slot {
+    state Open();
+    state Pending(ticket: own event<Copy>);
+    state Done();
+
+    transition issue(self: own Open) -> Pending;
+    await transition complete<C: Context>(@cx: C; self: own Pending)
+        -> Done !{gpu_await} where C allows {gpu_await};
+}
+
+procedure keep(slot: own Slot::Open) -> own Slot::Open { return slot; }
+procedure poll(@cx: host; value: f32) -> f32 !{poll} { return value; }
+
+protocol Flow roles producer, consumer {
+    state Unused { producer -> consumer: unused => Unused; }
+    state Open { producer -> consumer: finish => Done; }
+    state Done final;
+}
+
+pipeline Example(input x: f32, output y: f32) {
+    edge data: channel<Flow> { initial Open; capacity 1; }
+
+    stage send(@cx: host; src: f32, out: Flow::producer<Open>) -> void !{poll} {
+        poll(@cx; src);
+        poll(@cx; src);
+        return;
+    }
+    stage receive(@cx: host; in: Flow::consumer<Open>, dst: f32) -> void !{poll} {
+        return;
+    }
+
+    topology {
+        x => send.src;
+        send.out =>[data] receive.in;
+        receive.dst => y;
+    }
+    schedule host {
+        kernel worker = fuse(send, receive) { blocks 1; }
+    }
+}
