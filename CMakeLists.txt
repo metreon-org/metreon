@@ -9,6 +9,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
 
 option(METREON_ENABLE_MLIR "Build the Metreon MLIR dialect and GraphIR lowering" OFF)
+option(METREON_TEST_CUDA_EXECUTION "Run integration tests on an actual CUDA GPU" OFF)
+
+if(METREON_TEST_CUDA_EXECUTION AND NOT METREON_ENABLE_MLIR)
+    message(FATAL_ERROR "METREON_TEST_CUDA_EXECUTION requires METREON_ENABLE_MLIR=ON")
+endif()
 
 if(METREON_ENABLE_MLIR)
     # LLVM's package configuration performs C dependency checks.
@@ -81,16 +86,42 @@ if(METREON_ENABLE_MLIR)
         MLIRControlFlowToSCF MLIRMemRefDialect MLIRTransforms)
     metreon_enable_warnings(metreon_gpu_lowering)
     add_dependencies(metreon_mlir metreon_gpu_lowering)
+    add_library(metreon_device_execution lib/MLIR/DeviceExecution.cpp lib/MLIR/NVVMBackend.cpp lib/MLIR/ROCDLBackend.cpp)
+    target_include_directories(metreon_device_execution PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/include)
+    target_link_libraries(metreon_device_execution PUBLIC metreon_scalar_lowering
+        MLIRGPUToNVVMTransforms MLIRFuncToLLVM MLIRArithToLLVM MLIRControlFlowToLLVM MLIRMemRefToLLVM
+        MLIRNVVMToLLVMIRTranslation MLIRLLVMToLLVMIRTranslation MLIRBuiltinToLLVMIRTranslation MLIRTargetLLVMIRExport
+        MLIRGPUToROCDLTransforms MLIRROCDLToLLVMIRTranslation LLVM)
+    metreon_enable_warnings(metreon_device_execution)
+    add_dependencies(metreon_mlir metreon_device_execution)
+    add_library(metreon_aot lib/MLIR/HostExecution.cpp lib/CodeGen/AOT.cpp)
+    target_link_libraries(metreon_aot PUBLIC metreon_device_execution)
+    target_include_directories(metreon_aot PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/include)
+    metreon_enable_warnings(metreon_aot)
+    add_dependencies(metreon_mlir metreon_aot)
+    # Tools and import library used by the compiler's link step. metreonc itself
+    # has no CUDA/HIP dependency and never initializes a GPU.
+    find_package(CUDAToolkit QUIET)
+    find_program(METREON_PTXAS NAMES ptxas HINTS "${CUDAToolkit_BIN_DIR}" /usr/local/cuda/bin)
+    find_library(METREON_CUDA_DRIVER_LIBRARY NAMES cuda HINTS
+        "${CUDAToolkit_LIBRARY_DIR}" "${CUDAToolkit_LIBRARY_DIR}/stubs" /usr/lib/wsl/lib)
+    find_program(METREON_AMDGPU_LINKER NAMES ld.lld-${LLVM_VERSION_MAJOR} ld.lld
+        HINTS "${LLVM_TOOLS_BINARY_DIR}" /opt/rocm/llvm/bin)
+    find_library(METREON_HIP_LIBRARY NAMES amdhip64 HINTS /opt/rocm/lib /opt/rocm/lib64)
+    find_file(METREON_ROCM_OCKL NAMES ockl.bc HINTS /opt/rocm/amdgcn/bitcode /opt/rocm/lib/bitcode)
+    find_file(METREON_ROCM_ABI500 NAMES oclc_abi_version_500.bc HINTS /opt/rocm/amdgcn/bitcode /opt/rocm/lib/bitcode)
+    configure_file(cmake/Toolchain.h.in include/metreon/CodeGen/Toolchain.h @ONLY)
 endif()
 
 add_executable(metreonc tools/metreonc.cpp)
 target_link_libraries(metreonc PRIVATE metreon_frontend)
 if(METREON_ENABLE_MLIR)
-    target_link_libraries(metreonc PRIVATE metreon_mlir_import metreon_host_lowering metreon_gpu_lowering)
+    target_link_libraries(metreonc PRIVATE metreon_mlir_import metreon_host_lowering metreon_gpu_lowering metreon_device_execution metreon_aot)
     target_compile_definitions(metreonc PRIVATE METREON_ENABLE_MLIR=1)
     add_executable(metreon-opt tools/metreon-opt.cpp)
     target_link_libraries(metreon-opt PRIVATE metreon_dialect MLIROptLib MLIRLLVMDialect
-        MLIRGPUDialect MLIRAffineDialect MLIRSCFDialect MLIRFuncDialect MLIRArithDialect MLIRUBDialect)
+        MLIRGPUDialect MLIRAffineDialect MLIRSCFDialect MLIRFuncDialect MLIRArithDialect MLIRUBDialect
+        MLIRMemRefDialect MLIRControlFlowDialect MLIRNVVMDialect MLIRROCDLDialect)
     metreon_enable_warnings(metreon-opt)
 endif()
 metreon_enable_warnings(metreonc)
@@ -103,6 +134,51 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/examples/loops_and_conditionals.mtr)
     set(metreon_mlir_cli_options -DMLIR_ENABLED=OFF)
     if(METREON_ENABLE_MLIR)
+        add_executable(metreon_rocdl_tests tests/ROCDLLoweringTests.cpp)
+        target_link_libraries(metreon_rocdl_tests PRIVATE metreon_device_execution MLIRParser)
+        metreon_enable_warnings(metreon_rocdl_tests)
+        set(metreon_rocdl_test_options)
+        if(METREON_ROCM_OCKL AND METREON_ROCM_ABI500)
+            set(metreon_rocdl_test_options codegen)
+        endif()
+        add_test(NAME metreon.amdgpu.rocdl COMMAND metreon_rocdl_tests
+            ${CMAKE_CURRENT_SOURCE_DIR}/examples/vector_add.mtr ${metreon_rocdl_test_options})
+        find_program(METREON_LLVM_MC NAMES llvm-mc-${LLVM_VERSION_MAJOR} llvm-mc HINTS "${LLVM_TOOLS_BINARY_DIR}")
+        find_program(METREON_LLVM_READOBJ NAMES llvm-readobj-${LLVM_VERSION_MAJOR} llvm-readobj HINTS "${LLVM_TOOLS_BINARY_DIR}")
+        find_program(METREON_LLVM_OBJCOPY NAMES llvm-objcopy-${LLVM_VERSION_MAJOR} llvm-objcopy HINTS "${LLVM_TOOLS_BINARY_DIR}")
+        if(METREON_ROCM_OCKL AND METREON_ROCM_ABI500 AND METREON_AMDGPU_LINKER AND METREON_HIP_LIBRARY AND
+           METREON_LLVM_MC AND METREON_LLVM_READOBJ AND METREON_LLVM_OBJCOPY)
+            add_test(NAME metreon.amdgpu.aot.offline COMMAND ${CMAKE_COMMAND}
+                -DCOMPILER=$<TARGET_FILE:metreonc> -DINSPECTOR=$<TARGET_FILE:metreon-opt>
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/examples/vector_add.mtr
+                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/cli-tests/amd
+                -DMC=${METREON_LLVM_MC} -DREADOBJ=${METREON_LLVM_READOBJ} -DOBJCOPY=${METREON_LLVM_OBJCOPY}
+                -DAMD_LINKER=${METREON_AMDGPU_LINKER}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/AMDGPUCliTests.cmake)
+        endif()
+        add_executable(metreon_host_execution_tests tests/HostExecutionTests.cpp)
+        target_link_libraries(metreon_host_execution_tests PRIVATE metreon_aot MLIRParser)
+        metreon_enable_warnings(metreon_host_execution_tests)
+        add_test(NAME metreon.aot.host.contexts COMMAND metreon_host_execution_tests
+            ${CMAKE_CURRENT_SOURCE_DIR}/examples/vector_add.mtr)
+        add_executable(metreon_device_execution_tests tests/DeviceExecutionTests.cpp)
+        target_link_libraries(metreon_device_execution_tests PRIVATE metreon_device_execution MLIRParser)
+        metreon_enable_warnings(metreon_device_execution_tests)
+        add_test(NAME metreon.gpu.device.lowering COMMAND metreon_device_execution_tests
+            ${CMAKE_CURRENT_SOURCE_DIR}/examples/vector_add.mtr)
+        add_test(NAME metreon.gpu.device.cli COMMAND ${CMAKE_COMMAND}
+            -DCOMPILER=$<TARGET_FILE:metreonc> -DINSPECTOR=$<TARGET_FILE:metreon-opt>
+            -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/examples/vector_add.mtr
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/cli-tests/device
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/DeviceExecutionCliTests.cmake)
+        if(METREON_TEST_CUDA_EXECUTION)
+            add_test(NAME metreon.gpu.device.execution COMMAND ${CMAKE_COMMAND}
+                -DCOMPILER=$<TARGET_FILE:metreonc>
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/examples/vector_add.mtr
+                -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/cli-tests/cuda
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/AOTGPUExecutionTests.cmake)
+            set_tests_properties(metreon.gpu.device.execution PROPERTIES LABELS "gpu;cuda" TIMEOUT 120)
+        endif()
         add_executable(metreon_gpu_lowering_tests tests/GPULoweringTests.cpp)
         target_link_libraries(metreon_gpu_lowering_tests PRIVATE metreon_gpu_lowering MLIRParser)
         metreon_enable_warnings(metreon_gpu_lowering_tests)
@@ -154,6 +230,11 @@ if(BUILD_TESTING)
         "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/cli-tests/mlir output"
         ${metreon_mlir_cli_options}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/MLIRCliTests.cmake)
+    add_test(NAME metreon.aot.cli COMMAND ${CMAKE_COMMAND}
+        -DCOMPILER=$<TARGET_FILE:metreonc>
+        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/cli-tests/aot
+        ${metreon_mlir_cli_options}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/AOTCliTests.cmake)
     add_test(NAME metreon.host.llvm.cli COMMAND ${CMAKE_COMMAND}
         -DCOMPILER=$<TARGET_FILE:metreonc>
         -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/Inputs/HostControlFlow.mtr
@@ -211,8 +292,8 @@ if(BUILD_TESTING)
         "graphir.cfg.cond_br.*true.*false")
     metreon_add_graphir_cli_test(metreon.graphir.file.stdin procedures
         "graphir.cfg.procedure" -DSTDIN_INPUT=ON)
-    metreon_add_graphir_cli_test(metreon.graphir.file.default procedures
-        "graphir.cfg.procedure" -DDEFAULT_EMIT=ON)
+    metreon_add_graphir_cli_test(metreon.graphir.file.explicit procedures
+        "graphir.cfg.procedure")
     add_test(NAME metreon.graphir.file.failures
         COMMAND ${CMAKE_COMMAND}
             -DCOMPILER=$<TARGET_FILE:metreonc>

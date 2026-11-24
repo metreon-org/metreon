@@ -868,10 +868,14 @@ public:
     (*module)->setAttr("metreon.import_stage", str("semantic_structure"));
     (*module)->setAttr("metreon.ordinary_lowering", str("deferred"));
   }
-  FailureOr<OwningOpRef<ModuleOp>> run() {
+  FailureOr<OwningOpRef<ModuleOp>> run(bool contextsOnly = false) {
     try {
       allocateSymbols();
       importContexts();
+      if (contextsOnly) {
+        if (failed(verify(*module))) return failure();
+        return std::move(module);
+      }
       importResources();
       importCompositions();
       for (const auto &graph : source.procedureGraphs()) importCallable(graph, "procedure");
@@ -889,5 +893,8 @@ public:
 
 FailureOr<OwningOpRef<ModuleOp>> importGraphIR(const graphir::Module &source, MLIRContext &context) {
   return Importer(source, context).run();
+}
+FailureOr<OwningOpRef<ModuleOp>> importGraphIRContexts(const graphir::Module &source, MLIRContext &context) {
+  return Importer(source, context).run(true);
 }
 } // namespace metreon

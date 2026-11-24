@@ -1,5 +1,9 @@
 #include "metreon/MLIR/Dialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
+#include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -12,6 +16,7 @@ int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
   registry.insert<metreon::MetreonDialect>();
   registry.insert<mlir::LLVM::LLVMDialect>();
+  registry.insert<mlir::NVVM::NVVMDialect, mlir::ROCDL::ROCDLDialect, mlir::memref::MemRefDialect, mlir::cf::ControlFlowDialect>();
   registry.insert<mlir::affine::AffineDialect, mlir::arith::ArithDialect,
       mlir::func::FuncDialect, mlir::gpu::GPUDialect, mlir::scf::SCFDialect, mlir::ub::UBDialect>();
   return mlir::asMainReturnCode(

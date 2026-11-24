@@ -8,6 +8,8 @@ include "mlir/IR/SymbolInterfaces.td"
 // These are semantic contracts, not replacements for func/gpu callables.
 // deferred_body retains a lossless structured GraphIR operation tree until
 // ordinary computation is translated to standard dialects in a later stage.
+// Executable profiles instead use body_ref to link a live primary-dialect body;
+// the context/effect contract stays here until its target conversion consumes it.
 class Metreon_CallableContract<string mnemonic> : Metreon_Op<mnemonic, [
     Symbol, DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let arguments = (ins SymbolNameAttr:$sym_name,
@@ -16,7 +18,8 @@ class Metreon_CallableContract<string mnemonic> : Metreon_Op<mnemonic, [
       DictArrayAttr:$parameter_attrs, DictArrayAttr:$result_attrs,
       DictArrayAttr:$context_requirements, DictArrayAttr:$effects,
       OptionalAttr<SymbolRefAttr>:$context, StrAttr:$execution_domain,
-      DictArrayAttr:$deferred_body, DictArrayAttr:$deferred_cfg);
+      DictArrayAttr:$deferred_body, DictArrayAttr:$deferred_cfg,
+      OptionalAttr<SymbolRefAttr>:$body_ref);
   let hasVerifier = 1;
 }
 
@@ -28,6 +31,30 @@ def Metreon_KernelOp : Metreon_CallableContract<"kernel"> {
 }
 def Metreon_StageOp : Metreon_CallableContract<"stage"> {
   let summary = "Preserve a pipeline stage contract exactly once";
+}
+
+def Metreon_DeviceIntrinsicOp : Metreon_Op<"device_intrinsic", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "A context-authorized device indexing or memory intrinsic";
+  let description = [{
+    Context-only execution uses global_id, load and store with an exact nominal
+    context. The span profile is a contiguous, rank-one f32 global-memory view.
+    Context evidence is metadata and never a runtime operand. Conversion consumes
+    this authority and emits GPU/Arith/MemRef operations. This op is deliberately
+    not marked pure; it must be legalized before ordinary optimization.
+  }];
+  let arguments = (ins StrAttr:$kind, SymbolRefAttr:$context, Variadic<AnyType>:$inputs);
+  let results = (outs Variadic<AnyType>:$outputs);
+  let hasVerifier = 1;
+}
+
+def Metreon_HostIntrinsicOp : Metreon_Op<"host_intrinsic", [
+    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Context-authorized host memory, I/O, or GPU launch operation";
+  let arguments = (ins StrAttr:$kind, SymbolRefAttr:$context,
+      OptionalAttr<SymbolRefAttr>:$callee, Variadic<AnyType>:$inputs);
+  let results = (outs Variadic<AnyType>:$outputs);
+  let hasVerifier = 1;
 }
 
 class Metreon_DeclarationGroup<string mnemonic> : Metreon_Op<mnemonic, [

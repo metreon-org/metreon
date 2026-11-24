@@ -25,7 +25,7 @@ struct CallableAnalysis {
   std::unordered_map<const ast::Statement *, const ast::ContextDeclaration *> loopContexts;
 };
 
-CallableAnalysis validateCallables(const ast::Module &module);
+CallableAnalysis validateCallables(const ast::Module &module, bool contextOnly = false);
 void validateValueType(const ast::Module &module, const ast::ValueType &type,
                        bool allowVoid = false);
 void validateLiteralType(const ast::ValueType &type,
