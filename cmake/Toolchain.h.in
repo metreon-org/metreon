@@ -1,0 +1,10 @@
+#pragma once
+namespace metreon::toolchain {
+inline constexpr const char *hostLinker = "@CMAKE_CXX_COMPILER@";
+inline constexpr const char *ptxas = "@METREON_PTXAS@";
+inline constexpr const char *cudaDriver = "@METREON_CUDA_DRIVER_LIBRARY@";
+inline constexpr const char *amdLinker = "@METREON_AMDGPU_LINKER@";
+inline constexpr const char *hipLibrary = "@METREON_HIP_LIBRARY@";
+inline constexpr const char *ockl = "@METREON_ROCM_OCKL@";
+inline constexpr const char *abi500 = "@METREON_ROCM_ABI500@";
+}

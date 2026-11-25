@@ -749,11 +749,15 @@ void lowerEntryStates(const ast::Module &source, Module &module,
 
 } // namespace
 
-Module lowerModule(const ast::Module &sourceModule, std::string sourceName) {
+Module lowerModule(const ast::Module &sourceModule, std::string sourceName, bool contextOnly) {
   sema::validateContexts(sourceModule);
-  sema::validateResources(sourceModule);
-  sema::validateCompositions(sourceModule);
-  const auto callableAnalysis = sema::validateCallables(sourceModule);
+  if (contextOnly && (!sourceModule.resources.empty() || !sourceModule.protocols.empty() || !sourceModule.pipelines.empty()))
+    throw DiagnosticError({"sema.context_only_profile", "context-only device execution supports contexts, kernels and device procedures; resource/protocol/pipeline execution is deferred", {}});
+  if (!contextOnly) {
+    sema::validateResources(sourceModule);
+    sema::validateCompositions(sourceModule);
+  }
+  const auto callableAnalysis = sema::validateCallables(sourceModule, contextOnly);
 
   Module graph(std::move(sourceName));
   ContextMap contextsByIdentifier;

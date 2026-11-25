@@ -1,0 +1,52 @@
+context Gpu::Thread grants {gpu_load, gpu_store} gpu_thread;
+context Host::Process grants {host_memory, host_io, gpu_alloc, gpu_free,
+                             gpu_copy, gpu_await, gpu_launch<gpu_thread>} host;
+context Host::Loop host_loop;
+
+kernel vector_add(@cx: gpu_thread;
+                  a: gpu::span<f32>, b: gpu::span<f32>, out: gpu::span<f32>, n: index) {
+    index i = gpu::global_id(@cx);
+    if (i < n) {
+        f32 left = gpu::load(@cx; a, i);
+        f32 right = gpu::load(@cx; b, i);
+        gpu::store(@cx; out, i, left + right);
+    }
+}
+
+procedure main(@cx: host) -> i32 {
+    const index n = 8;
+    host::span<f32> a = host::alloc(@cx; n);
+    host::span<f32> b = host::alloc(@cx; n);
+    host::span<f32> out = host::alloc(@cx; n);
+    for<@cx: host_loop> (index i) in 0..n {
+        if (i % 2 == 0) {
+            host::store(@cx; a, i, 1.5);
+            host::store(@cx; b, i, 2.5);
+        } else {
+            host::store(@cx; a, i, -4.0);
+            host::store(@cx; b, i, 10.0);
+        }
+    }
+    gpu::span<f32> da = gpu::alloc(@cx; n);
+    gpu::span<f32> db = gpu::alloc(@cx; n);
+    gpu::span<f32> dout = gpu::alloc(@cx; n);
+    gpu::upload(@cx; da, a);
+    gpu::upload(@cx; db, b);
+    index blocks = (n + 127) / 128;
+    gpu::launch::vector_add(@cx; blocks, 128, da, db, dout, n);
+    gpu::wait(@cx);
+    gpu::download(@cx; dout, out);
+    for<@cx: host_loop> (index i) in 0..n {
+        f32 actual = host::load(@cx; out, i);
+        f32 expected = host::load(@cx; a, i) + host::load(@cx; b, i);
+        if (actual != expected) { return 1; }
+        host::print_f32(@cx; actual);
+    }
+    gpu::free(@cx; da);
+    gpu::free(@cx; db);
+    gpu::free(@cx; dout);
+    host::free(@cx; a);
+    host::free(@cx; b);
+    host::free(@cx; out);
+    return 0;
+}

@@ -8,10 +8,7 @@ else()
     set(output_name "${input_name}.graphir")
 endif()
 
-set(emit_argument)
-if(NOT DEFAULT_EMIT)
-    set(emit_argument --emit=graphir)
-endif()
+set(emit_argument --emit=graphir)
 execute_process(
     COMMAND "${COMPILER}" ${emit_argument} "${input_argument}"
     INPUT_FILE "${INPUT}"

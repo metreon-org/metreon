@@ -64,7 +64,7 @@ struct LoopFrame {
 
 class Validator {
 public:
-  explicit Validator(const ast::Module &module) : module_(module) {}
+  explicit Validator(const ast::Module &module, bool contextOnly) : module_(module), contextOnly_(contextOnly) {}
   CallableAnalysis run();
 
 private:
@@ -78,6 +78,8 @@ private:
   Local &lookup(const ast::Expression &expression);
   ast::ValueType expression(const ast::Expression &expression);
   ast::ValueType call(const ast::Expression &expression);
+  ast::ValueType gpuBuiltin(const ast::Expression &expression);
+  ast::ValueType hostBuiltin(const ast::Expression &expression);
   void match(const ast::Expression &expression, const ast::ValueType &actual,
              const ast::ValueType &expected);
   unsigned block(const ast::Statement &block, bool nested);
@@ -94,6 +96,7 @@ private:
                                const Transition &transition);
 
   const ast::Module &module_;
+  bool contextOnly_;
   CallableAnalysis analysis_;
   std::unordered_map<std::string, const ast::ContextDeclaration *> contexts_;
   std::unordered_map<std::string, const ast::ResourceDeclaration *> states_;
@@ -128,6 +131,7 @@ void Validator::requireCapabilities(
 
 void Validator::requireEffects(const std::vector<ast::TypeReference> &effects,
                                SourceLocation location) const {
+  if (contextOnly_) return;
   for (const auto &effect : effects) {
     if (std::none_of(current_->effects.begin(), current_->effects.end(),
                      [&](const auto &declared) { return declared.str() == effect.str(); })) {
@@ -201,6 +205,12 @@ CallableAnalysis Validator::run() {
   auto add = [&](const auto &declarations, bool isKernel) {
     for (const auto &declaration : declarations) {
       const std::string name = declaration.name.str();
+      if (name == "gpu::global_id" || name == "gpu::load" || name == "gpu::store" ||
+          name.starts_with("gpu::launch::") || name == "gpu::alloc" || name == "gpu::free" ||
+          name == "gpu::upload" || name == "gpu::download" || name == "gpu::wait" ||
+          name == "host::alloc" || name == "host::free" || name == "host::load" ||
+          name == "host::store" || name == "host::print_f32")
+        fail("reserved_gpu_intrinsic", "GPU intrinsic names cannot be redeclared", declaration.location);
       if (!callables_.emplace(name, Callable{&declaration, isKernel}).second ||
           transitions_.contains(name)) {
         fail(isKernel ? "duplicate_kernel" : "duplicate_callable",
@@ -586,6 +596,13 @@ void Validator::infer(const ast::TypeReference &pattern,
 }
 
 ast::ValueType Validator::call(const ast::Expression &expr) {
+  const auto name = expr.name.str();
+  if (name.starts_with("gpu::launch::") || name == "gpu::alloc" || name == "gpu::free" ||
+      name == "gpu::upload" || name == "gpu::download" || name == "gpu::wait" ||
+      name == "host::alloc" || name == "host::free" || name == "host::load" ||
+      name == "host::store" || name == "host::print_f32") return hostBuiltin(expr);
+  if (expr.name.str() == "gpu::global_id" || expr.name.str() == "gpu::load" || expr.name.str() == "gpu::store")
+    return gpuBuiltin(expr);
   const auto transition = transitions_.find(expr.name.str());
   if (transition != transitions_.end()) {
     return transitionCall(expr, transition->second);
@@ -631,6 +648,93 @@ ast::ValueType Validator::call(const ast::Expression &expr) {
   info.context = calleeContext;
   info.effects = callee.effects;
   return callee.resultType;
+}
+
+ast::ValueType Validator::gpuBuiltin(const ast::Expression &expr) {
+  const auto name = expr.name.str();
+  const auto arity = name == "gpu::global_id" ? 1u : name == "gpu::load" ? 3u : 4u;
+  if (expr.arguments.size() != arity) fail("call_arity", "wrong argument count for `" + name + "`", expr.location);
+  contextArgument(expr.arguments[0]);
+  if (!context_ || context_->name.components.empty() || context_->name.components.front() != "Gpu" ||
+      context_->name.components.back() == "Loop")
+    fail("gpu_execution_context", "GPU intrinsics require a Gpu execution context", expr.location);
+  std::vector<ast::TypeReference> effects;
+  if (name != "gpu::global_id") {
+    const auto span = expression(expr.arguments[1]);
+    if (span.str() != "gpu::span<f32>") fail("type_mismatch", "GPU memory intrinsics require gpu::span<f32>", expr.arguments[1].location);
+    match(expr.arguments[2], expression(expr.arguments[2]), simpleType("index", expr.location));
+    if (name == "gpu::store") match(expr.arguments[3], expression(expr.arguments[3]), simpleType("f32", expr.location));
+    effects.push_back(simpleType(name == "gpu::load" ? "gpu_load" : "gpu_store", expr.location).reference);
+    requireCapabilities(effects, context_, expr.location);
+    requireEffects(effects, expr.location);
+  }
+  auto &info = analysis_.expressions[&expr];
+  info.context = context_;
+  info.calleeKind = "gpu_builtin";
+  info.calleeName = name;
+  info.effects = std::move(effects);
+  return simpleType(name == "gpu::global_id" ? "index" : name == "gpu::load" ? "f32" : "void", expr.location);
+}
+
+ast::ValueType Validator::hostBuiltin(const ast::Expression &expr) {
+  const auto name = expr.name.str();
+  if (expr.arguments.empty()) fail("call_arity", "host intrinsic requires @cx", expr.location);
+  contextArgument(expr.arguments[0]);
+  if (!context_ || context_->name.components.front() != "Host" || context_->name.components.back() == "Loop")
+    fail("host_execution_context", "host intrinsics require a Host execution context", expr.location);
+  auto span = [&](const std::string &domain) {
+    auto type = simpleType("span", expr.location);
+    type.reference.name.components = {domain, "span"};
+    type.reference.arguments = {simpleType("f32", expr.location).reference};
+    return type;
+  };
+  const auto hostSpan = span("host"), gpuSpan = span("gpu");
+  const auto index = simpleType("index", expr.location), real = simpleType("f32", expr.location);
+  auto result = simpleType("void", expr.location);
+  std::vector<ast::ValueType> inputs;
+  auto grant = simpleType("host_memory", expr.location).reference;
+  if (name.starts_with("gpu::launch::")) {
+    const auto target = name.substr(std::string("gpu::launch::").size());
+    const auto found = callables_.find(target);
+    if (found == callables_.end() || !found->second.isKernel)
+      fail("unknown_kernel", "GPU launch must name a kernel", expr.location);
+    const auto *selected = analysis_.contexts.at(found->second.declaration);
+    if (!selected) fail("kernel_execution_context", "launched kernel must declare a GPU context", expr.location);
+    grant = simpleType("gpu_launch", expr.location).reference;
+    grant.arguments = {simpleType(selected->identifier, expr.location).reference};
+    inputs = {index, index};
+    for (const auto &parameter : found->second.declaration->parameters)
+      if (!parameter.isContextEvidence) inputs.push_back(parameter.type);
+  } else if (name == "host::alloc" || name == "gpu::alloc") {
+    inputs = {index};
+    result = name == "host::alloc" ? hostSpan : gpuSpan;
+    if (name == "gpu::alloc") grant.name.components = {"gpu_alloc"};
+  } else if (name == "host::free" || name == "gpu::free") {
+    inputs = {name == "host::free" ? hostSpan : gpuSpan};
+    if (name == "gpu::free") grant.name.components = {"gpu_free"};
+  } else if (name == "host::load") {
+    inputs = {hostSpan, index}; result = real;
+  } else if (name == "host::store") {
+    inputs = {hostSpan, index, real};
+  } else if (name == "host::print_f32") {
+    inputs = {real}; grant.name.components = {"host_io"};
+  } else if (name == "gpu::upload" || name == "gpu::download") {
+    inputs = {gpuSpan, hostSpan}; grant.name.components = {"gpu_copy"};
+  } else if (name == "gpu::wait") {
+    grant.name.components = {"gpu_await"};
+  }
+  if (expr.arguments.size() != inputs.size() + 1)
+    fail("call_arity", "wrong argument count for `" + name + "`", expr.location);
+  for (size_t i = 0; i < inputs.size(); ++i)
+    match(expr.arguments[i + 1], expression(expr.arguments[i + 1]), inputs[i]);
+  requireCapabilities({grant}, context_, expr.location);
+  requireEffects({grant}, expr.location);
+  auto &info = analysis_.expressions[&expr];
+  info.context = context_;
+  info.calleeKind = "host_builtin";
+  info.calleeName = name;
+  info.effects = {grant};
+  return result;
 }
 
 ast::ValueType Validator::transitionCall(const ast::Expression &expr,
@@ -850,6 +954,11 @@ void validateValueType(const ast::Module &module, const ast::ValueType &type,
       fail("type_arity", "wrong generic arity for `" + name + "`", type.location);
     return;
   }
+  if (name == "gpu::span" || name == "host::span") {
+    if (type.ownership != ast::OwnershipQualifier::None || reference.arguments.size() != 1 || reference.arguments[0].str() != "f32")
+      fail("span_type", "executable spans support unowned f32 elements only", type.location);
+    return;
+  }
   fail("unknown_value_type", "unknown value type `" + reference.str() + "`", type.location);
 }
 
@@ -866,8 +975,8 @@ void validateLiteralType(const ast::ValueType &type,
   if (!matches) fail("type_mismatch", "literal does not match `" + type.str() + "`", literal.location);
 }
 
-CallableAnalysis validateCallables(const ast::Module &module) {
-  return Validator(module).run();
+CallableAnalysis validateCallables(const ast::Module &module, bool contextOnly) {
+  return Validator(module, contextOnly).run();
 }
 
 } // namespace metreon::sema

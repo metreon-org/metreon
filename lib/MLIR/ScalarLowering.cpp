@@ -1,5 +1,6 @@
 #include "ScalarLowering.h"
 #include "CanonicalSyntax.h"
+#include "metreon/MLIR/Dialect.h"
 #include "metreon/GraphIR/ControlFlow.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -30,6 +31,8 @@ class ScalarCFGBuilder {
   ArrayRef<const graphir::CallableGraph *> graphs;
   MLIRContext &context;
   unsigned indexBits;
+  bool deviceExecution;
+  bool hostExecution;
   OpBuilder builder;
   OwningOpRef<ModuleOp> output;
   SourceLocation current;
@@ -43,6 +46,10 @@ class ScalarCFGBuilder {
     auto name = type.reference.name.str();
     if (type.ownership != ast::OwnershipQualifier::None)
       fail("scalar lowering does not erase ownership/resource obligations");
+    if ((deviceExecution || hostExecution) && text == "gpu::span<f32>")
+      return MemRefType::get({ShapedType::kDynamic}, builder.getF32Type(), MemRefLayoutAttrInterface{}, builder.getI64IntegerAttr(1));
+    if (hostExecution && text == "host::span<f32>")
+      return MemRefType::get({ShapedType::kDynamic}, builder.getF32Type());
     if (name == "view" || name == "buffer")
       fail("scalar view/buffer lowering requires an explicit extent, layout and access contract");
     if (!type.reference.arguments.empty()) fail("scalar lowering requires a concrete scalar type");
@@ -159,7 +166,52 @@ class ScalarCFGBuilder {
       if (!isa<NoneType>(result)) results.push_back(result);
       builder.setInsertionPointToEnd(output->getBody());
       auto function = builder.create<func::FuncOp>(location(current), graph.name(), builder.getFunctionType(parameters, results));
+      if (deviceExecution || hostExecution) {
+        if (hostExecution && graph.context())
+          function->setAttr("metreon.context", FlatSymbolRefAttr::get(&context, graph.context()->identifier()));
+        SmallVector<Attribute> loopContexts;
+        graphir::walkCallableOperations(graph.body(), [&](const auto &op) {
+          if (op.loopContext)
+            loopContexts.push_back(FlatSymbolRefAttr::get(&context, op.loopContext->identifier()));
+        });
+        function->setAttr("metreon.loop_contexts", builder.getArrayAttr(loopContexts));
+      }
       functions.emplace(graph.name(), function);
+    }
+  }
+
+  DictionaryAttr sourceType(const ast::TypeReference &type) {
+    SmallVector<Attribute> arguments;
+    for (const auto &argument : type.arguments) arguments.push_back(sourceType(argument));
+    return builder.getDictionaryAttr({builder.getNamedAttr("name", builder.getStringAttr(type.name.str())),
+        builder.getNamedAttr("arguments", builder.getArrayAttr(arguments))});
+  }
+  void declareKernels() {
+    for (const auto &graph : source.kernelGraphs()) {
+      SmallVector<Type> types;
+      SmallVector<Attribute> parameters;
+      for (const auto &parameter : graph.parameters()) if (!parameter.context) {
+        auto type = scalar(parameter.type);
+        types.push_back(type);
+        parameters.push_back(builder.getDictionaryAttr({
+            builder.getNamedAttr("name", builder.getStringAttr(parameter.name)),
+            builder.getNamedAttr("type", TypeAttr::get(type)),
+            builder.getNamedAttr("ownership", builder.getStringAttr("none")),
+            builder.getNamedAttr("source_type", sourceType(Syntax::valueType(parameter.type).reference))}));
+      }
+      OperationState state(location(graph.location()), KernelOp::getOperationName());
+      state.addAttribute("sym_name", builder.getStringAttr(graph.name()));
+      state.addAttribute("function_type", TypeAttr::get(builder.getFunctionType(types, {})));
+      state.addAttribute("parameter_attrs", builder.getArrayAttr(parameters));
+      for (const auto *key : {"result_attrs", "effects", "context_requirements", "deferred_body", "deferred_cfg"})
+        state.addAttribute(key, builder.getArrayAttr({}));
+      state.addAttribute("execution_domain", builder.getStringAttr("Gpu"));
+      if (graph.context()) {
+        source.requireContextUse(graph.context(), graphir::ContextUse::MetadataAttachment);
+        state.addAttribute("context", FlatSymbolRefAttr::get(&context, graph.context()->identifier()));
+      }
+      builder.setInsertionPointToEnd(output->getBody());
+      builder.create(state);
     }
   }
 
@@ -279,6 +331,33 @@ class ScalarCFGBuilder {
           break;
         }
         case graphir::CallableOperationKind::Call: {
+          if (hostExecution && required(op.attributes, "callee_kind") == "host_builtin") {
+            OperationState state(loc, HostIntrinsicOp::getOperationName());
+            const StringRef prefix = "gpu::launch::";
+            const bool launch = StringRef(op.name).starts_with(prefix);
+            state.addAttribute("kind", builder.getStringAttr(launch ? "gpu::launch" : op.name));
+            if (launch) state.addAttribute("callee", FlatSymbolRefAttr::get(&context, StringRef(op.name).drop_front(prefix.size())));
+            if (!op.context || !op.context->hasIdentifier()) fail("host intrinsic has no nominal context");
+            state.addAttribute("context", FlatSymbolRefAttr::get(&context, op.context->identifier()));
+            for (size_t index = 0; index < op.operands.size(); ++index) state.addOperands(operand(index));
+            auto type = scalar(types.at(id), true);
+            if (!isa<NoneType>(type)) state.addTypes(type);
+            auto *intrinsic = builder.create(state);
+            if (intrinsic->getNumResults()) result = intrinsic->getResult(0);
+            break;
+          }
+          if (deviceExecution && required(op.attributes, "callee_kind") == "gpu_builtin") {
+            if (!op.context || !op.context->hasIdentifier()) fail("device intrinsic has no declared nominal context");
+            OperationState state(loc, DeviceIntrinsicOp::getOperationName());
+            state.addAttribute("kind", builder.getStringAttr(StringRef(op.name).drop_front(5)));
+            state.addAttribute("context", FlatSymbolRefAttr::get(&context, op.context->identifier()));
+            for (std::size_t index = 0; index < op.operands.size(); ++index) state.addOperands(operand(index));
+            auto type = scalar(types.at(id), true);
+            if (!isa<NoneType>(type)) state.addTypes(type);
+            auto *intrinsic = builder.create(state);
+            if (intrinsic->getNumResults()) result = intrinsic->getResult(0);
+            break;
+          }
           auto found = functions.find(op.name);
           if (found == functions.end()) fail("scalar call has no declared procedure");
           SmallVector<Value> arguments;
@@ -293,6 +372,8 @@ class ScalarCFGBuilder {
           if (runtimeIndex != arguments.size() || types.at(id) != required((*declaration)->attributes(), "return_type"))
             fail("GraphIR call source signature mismatch");
           auto call = builder.create<func::CallOp>(loc, op.name, found->second.getResultTypes(), arguments);
+          if ((deviceExecution || hostExecution) && op.context)
+            call->setAttr("metreon.context", FlatSymbolRefAttr::get(&context, op.context->identifier()));
           if (call.getNumResults()) result = call.getResult(0);
           break;
         }
@@ -324,16 +405,22 @@ class ScalarCFGBuilder {
 
 public:
   ScalarCFGBuilder(const graphir::Module &source, ArrayRef<const graphir::CallableGraph *> graphs,
-                   MLIRContext &context, unsigned indexBits)
-      : source(source), graphs(graphs), context(context), indexBits(indexBits), builder(&context) {
+                   MLIRContext &context, unsigned indexBits, bool deviceExecution, bool hostExecution)
+      : source(source), graphs(graphs), context(context), indexBits(indexBits), deviceExecution(deviceExecution), hostExecution(hostExecution), builder(&context) {
+    if (deviceExecution || hostExecution) context.getOrLoadDialect<MetreonDialect>();
     context.getOrLoadDialect<arith::ArithDialect>();
     context.getOrLoadDialect<cf::ControlFlowDialect>();
     context.getOrLoadDialect<func::FuncDialect>();
     context.getOrLoadDialect<memref::MemRefDialect>();
-    output = ModuleOp::create(location({}));
+    if (deviceExecution || hostExecution) {
+      auto declarations = importGraphIRContexts(source, context);
+      if (succeeded(declarations)) output = std::move(*declarations);
+    } else output = ModuleOp::create(location({}));
   }
   FailureOr<OwningOpRef<ModuleOp>> run() {
     try {
+      if (!output) return failure();
+      if (hostExecution) declareKernels();
       declareFunctions();
       for (const auto *graph : graphs) {
         graphir::walkCallableOperations(graph->body(), [&](const auto &op) {
@@ -353,7 +440,7 @@ public:
 };
 } // namespace
 FailureOr<OwningOpRef<ModuleOp>> lowerScalarCFG(const graphir::Module &source,
-    ArrayRef<const graphir::CallableGraph *> graphs, MLIRContext &context, unsigned indexBits) {
-  return ScalarCFGBuilder(source, graphs, context, indexBits).run();
+    ArrayRef<const graphir::CallableGraph *> graphs, MLIRContext &context, unsigned indexBits, bool deviceExecution, bool hostExecution) {
+  return ScalarCFGBuilder(source, graphs, context, indexBits, deviceExecution, hostExecution).run();
 }
 } // namespace metreon::detail

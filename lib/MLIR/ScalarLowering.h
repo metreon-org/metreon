@@ -10,5 +10,6 @@ namespace metreon::detail {
 ::mlir::FailureOr<::mlir::OwningOpRef<::mlir::ModuleOp>> lowerScalarCFG(
     const graphir::Module &source,
     ::llvm::ArrayRef<const graphir::CallableGraph *> graphs,
-    ::mlir::MLIRContext &context, unsigned indexBits);
+    ::mlir::MLIRContext &context, unsigned indexBits, bool deviceExecution = false,
+    bool hostExecution = false);
 } // namespace metreon::detail

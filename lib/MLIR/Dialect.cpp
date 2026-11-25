@@ -291,6 +291,68 @@ METREON_CALLABLE_VERIFY(KernelOp)
 METREON_CALLABLE_VERIFY(StageOp)
 #undef METREON_CALLABLE_VERIFY
 
+LogicalResult DeviceIntrinsicOp::verify() {
+  const auto kind = getKind();
+  if (kind == "global_id") {
+    if (getNumOperands() || getNumResults() != 1 || !getResult(0).getType().isIndex())
+      return emitOpError("global_id requires no runtime operands and one index result");
+    return success();
+  }
+  if (kind != "load" && kind != "store") return emitOpError("unsupported device intrinsic");
+  if (getNumOperands() != (kind == "load" ? 2u : 3u)) return emitOpError("invalid memory intrinsic arity");
+  auto span = dyn_cast<MemRefType>(getOperand(0).getType());
+  auto space = span ? dyn_cast_or_null<IntegerAttr>(span.getMemorySpace()) : IntegerAttr{};
+  if (!span || span.getRank() != 1 || !span.getElementType().isF32() || !span.getLayout().isIdentity() ||
+      !space || space.getInt() != 1 || !getOperand(1).getType().isIndex())
+    return emitOpError("requires an index and contiguous rank-one f32 global span");
+  if (kind == "load") {
+    if (getNumResults() != 1 || !getResult(0).getType().isF32()) return emitOpError("load returns f32");
+  } else if (getNumResults() || !getOperand(2).getType().isF32()) return emitOpError("store takes f32 and returns no value");
+  return success();
+}
+LogicalResult DeviceIntrinsicOp::verifySymbolUses(SymbolTableCollection &tables) {
+  return references(*this, tables);
+}
+
+LogicalResult HostIntrinsicOp::verify() {
+  const auto kind = getKind();
+  auto span = [](Type type, bool device) {
+    auto memory = dyn_cast<MemRefType>(type);
+    if (!memory || memory.getRank() != 1 || !memory.isDynamicDim(0) ||
+        !memory.getElementType().isF32() || !memory.getLayout().isIdentity()) return false;
+    auto space = dyn_cast_or_null<IntegerAttr>(memory.getMemorySpace());
+    return device ? space && space.getInt() == 1 : !memory.getMemorySpace();
+  };
+  auto args = getInputs();
+  auto noResult = [&] { return getNumResults() == 0; };
+  bool valid = false;
+  if (kind == "host::alloc" || kind == "gpu::alloc")
+    valid = args.size() == 1 && args[0].getType().isIndex() && getNumResults() == 1 && span(getResult(0).getType(), kind == "gpu::alloc");
+  else if (kind == "host::free" || kind == "gpu::free")
+    valid = args.size() == 1 && span(args[0].getType(), kind == "gpu::free") && noResult();
+  else if (kind == "host::load")
+    valid = args.size() == 2 && span(args[0].getType(), false) && args[1].getType().isIndex() && getNumResults() == 1 && getResult(0).getType().isF32();
+  else if (kind == "host::store")
+    valid = args.size() == 3 && span(args[0].getType(), false) && args[1].getType().isIndex() && args[2].getType().isF32() && noResult();
+  else if (kind == "host::print_f32") valid = args.size() == 1 && args[0].getType().isF32() && noResult();
+  else if (kind == "gpu::upload" || kind == "gpu::download")
+    valid = args.size() == 2 && span(args[0].getType(), true) && span(args[1].getType(), false) && noResult();
+  else if (kind == "gpu::wait") valid = args.empty() && noResult();
+  else if (kind == "gpu::launch")
+    valid = args.size() >= 2 && args[0].getType().isIndex() && args[1].getType().isIndex() && getCalleeAttr() && noResult();
+  if (!valid) return emitOpError("unsupported host intrinsic or invalid signature");
+  return success();
+}
+LogicalResult HostIntrinsicOp::verifySymbolUses(SymbolTableCollection &tables) {
+  if (failed(references(*this, tables))) return failure();
+  if (getKind() == "gpu::launch") {
+    auto kernel = dyn_cast_or_null<KernelOp>(resolve(*this, getCalleeAttr(), tables));
+    if (!kernel || getInputs().drop_front(2).getTypes() != kernel.getFunctionType().getInputs())
+      return emitOpError("launch arguments disagree with the kernel declaration");
+  }
+  return success();
+}
+
 #define METREON_GROUP_VERIFY(NAME) \
   LogicalResult NAME::verify() { return declarationGroup(*this, getBody()); } \
   LogicalResult NAME::verifySymbolUses(SymbolTableCollection &tables) { \

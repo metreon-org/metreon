@@ -1,0 +1,43 @@
+file(MAKE_DIRECTORY "${WORK_DIR}" "${WORK_DIR}/standalone")
+file(READ "${INPUT}" source)
+function(compile_program text)
+    file(WRITE "${WORK_DIR}/vector_add.mtr" "${text}")
+    execute_process(COMMAND "${COMPILER}" vector_add.mtr
+        WORKING_DIRECTORY "${WORK_DIR}" RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
+    if(NOT result EQUAL 0 OR NOT stdout STREQUAL "Executable written to vector_add\n" OR NOT stderr STREQUAL "")
+        message(FATAL_ERROR "AoT compilation failed or executed user code: ${result} ${stdout} ${stderr}")
+    endif()
+    file(READ "${WORK_DIR}/vector_add" magic OFFSET 0 LIMIT 4 HEX)
+    if(NOT magic STREQUAL "7f454c46")
+        message(FATAL_ERROR "compiler did not produce an ELF executable")
+    endif()
+endfunction()
+function(run_program size)
+    # Only the executable is copied; no source, device image or input sidecar.
+    file(COPY_FILE "${WORK_DIR}/vector_add" "${WORK_DIR}/standalone/program")
+    file(CHMOD "${WORK_DIR}/standalone/program" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E env CUDA_DISABLE_JIT=1 ./program
+        WORKING_DIRECTORY "${WORK_DIR}/standalone" RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
+    if(NOT result EQUAL 0 OR NOT stderr STREQUAL "")
+        message(FATAL_ERROR "standalone GPU program failed with PTX JIT disabled: ${result} ${stdout} ${stderr}")
+    endif()
+    message(STATUS "AoT GPU executable verified ${size} vector elements")
+endfunction()
+compile_program("${source}")
+run_program(8)
+string(REPLACE "const index n = 8" "const index n = 4099" large "${source}")
+compile_program("${large}")
+run_program(4099)
+# Source main detects a bad kernel only when the binary executes.
+string(REPLACE "left + right" "left - right" wrong "${source}")
+compile_program("${wrong}")
+execute_process(COMMAND "${CMAKE_COMMAND}" -E env CUDA_DISABLE_JIT=1 ./vector_add
+    WORKING_DIRECTORY "${WORK_DIR}" RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
+if(NOT result EQUAL 1 OR NOT stdout STREQUAL "" OR NOT stderr STREQUAL "")
+    message(FATAL_ERROR "source main did not detect the changed kernel: ${result} ${stdout} ${stderr}")
+endif()
+string(REPLACE "gpu::store(@cx; out, i, left + right);"
+    "f32 total = 0.0; for<@cx: repeat> (i32 pass) in 0..2 { if (pass == 0) { continue; } total = sum(@cx; left, right); } gpu::store(@cx; out, i, total);"
+    loops "${source}")
+compile_program("context Gpu::Loop repeat;\nprocedure sum(@cx: gpu_thread; a: f32, b: f32) -> f32 { return a + b; }\n${loops}")
+run_program(8)
